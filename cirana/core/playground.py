@@ -454,12 +454,16 @@ class PlaygroundManager(QObject):
         except psutil.Error:
             return {"pid": pid, "created": 0.0}
 
-    def _persist(self) -> None:
+    def _persist(self, keep: set[str] | None = None) -> None:
+        """``keep``: only these sessions (used at shutdown for windows that could not be handed back yet)."""
         entries = []
         for session in self._sessions.values():
+            if keep is not None and session.id not in keep:
+                continue
             # Docked windows survive a CIRANA crash with their window intact, so they need no recovery; and for UWP
             # apps the pid is ApplicationFrameHost.exe, which hosts every UWP app: never offer to end that.
-            if session.state is SessionState.EMBEDDED and session.pid and not session.docked:
+            # A kept session may already say DETACHED: its window is still in the host all the same.
+            if (keep is not None or session.state is SessionState.EMBEDDED) and session.pid and not session.docked:
                 identity = self._process_identity(session.pid)
                 entries.append({
                     "session": session.id, "app_id": session.app_id, "title": session.title, "exe": session.exe,
@@ -470,7 +474,12 @@ class PlaygroundManager(QObject):
         except (OSError, ValueError):
             log.exception("Could not write the playground session file")
 
-    def clear_persisted_state(self) -> None:
+    def clear_persisted_state(self, keep: set[str] | None = None) -> None:
+        """Forget the crash-recovery records, except those of the ``keep`` sessions: their windows are still
+        parented to a host, so they stay recoverable on the next start if CIRANA ends before they are released."""
+        if keep:
+            self._persist(keep)
+            return
         try:
             self._settings.playground_store.save({"embedded": []})
         except (OSError, ValueError):

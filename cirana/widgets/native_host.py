@@ -121,6 +121,9 @@ class NativeHost(QWidget):
             raise PermissionError("CIRANA only closes applications it launched itself.")
         self._embedded = None
         self._stop_watching()
+        # request_close detaches first; a hung application may keep its window parented here until it answers,
+        # so restore_pending() must see it, or the host would be deleted and destroy the window with it.
+        self._released = embedded
         sent = embedder.request_close(embedded)
         self.embedded_changed.emit()
         return sent

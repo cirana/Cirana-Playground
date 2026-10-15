@@ -122,6 +122,57 @@ class ManagerTests(TempHomeTestCase):
         self.assertEqual(odd.layout.windows, {})
         self.assertEqual(odd.layout.tab_order, ["a"])
 
+    def test_malformed_nested_fields_are_skipped_and_good_data_kept(self):
+        good = self.ws.create("Good", [stable_app_id("Alpha")])
+        self.ws.save_layout(good.id, SavedLayout([stable_app_id("Alpha")], stable_app_id("Alpha"),
+                                                 {stable_app_id("Alpha"): {"rect": [1, 2, 3, 4], "maximized": False}}))
+        alpha = {"app_id": "a", "name": "A", "mode": MODE_EMBEDDED}
+        self.settings.workspaces_store.save({"workspaces": [
+            self.ws.get(good.id).to_dict(),
+            {"id": "ws-apps-null", "name": "Apps null", "apps": None},
+            {"id": "ws-apps-int", "name": "Apps int", "apps": 5, "created": "yesterday", "updated": [1]},
+            {"id": "ws-windows-list", "name": "Windows list", "apps": [alpha],
+             "layout": {"windows": ["a"], "tab_order": None, "active": 7, "saved_at": "soon"}},
+            {"id": "ws-windows-str", "name": "Windows str", "layout": {"windows": "a", "tab_order": 3}},
+            {"id": "ws-tab-str", "name": "Tab str", "layout": {"tab_order": "abc", "windows": {"a": [1, 2, 3, 4]}}},
+            {"id": "ws-bad-rect", "name": "Bad rect",
+             "layout": {"windows": {"a": {"rect": [True, 2, 3, 4]}, "b": {"rect": "1,2,3,4"},
+                                    "c": {"rect": [1, 2, 3, 4], "maximized": True}}}},
+            {"id": "ws-bad-app", "name": "Bad app", "apps": [{"app_id": "a", "name": {"x": 1}, "mode": ["embedded"]},
+                                                             {"app_id": ["b"]}, None]},
+            {"id": "ws-layout-list", "name": "Layout list", "layout": [1, 2], "created": float("nan")},
+            {"id": ["x"], "name": "Bad id"}, {"id": "ws-bad-name", "name": {"n": 1}}, {"id": "", "name": "Empty id"},
+            {"id": "ws-number", "name": 2024},
+        ]})
+        self.settings.set("active_workspace", ["not", "a", "string"])
+        self.build()  # must not raise
+        self.assertEqual([w.id for w in self.ws.all()], [
+            good.id, "ws-apps-null", "ws-apps-int", "ws-windows-list", "ws-windows-str", "ws-tab-str", "ws-bad-rect",
+            "ws-bad-app", "ws-layout-list", "ws-number",
+        ])
+        self.assertEqual(self.ws.get("ws-number").name, "2024")  # loaded as before
+        kept = self.ws.get(good.id)  # the intact workspace is untouched
+        self.assertEqual([a.app_id for a in kept.apps], [stable_app_id("Alpha")])
+        self.assertEqual(kept.layout.windows[stable_app_id("Alpha")], {"rect": [1, 2, 3, 4], "maximized": False})
+        self.assertEqual(self.ws.get("ws-apps-null").apps, [])
+        self.assertEqual((self.ws.get("ws-apps-int").created, self.ws.get("ws-apps-int").updated), (0.0, 0.0))
+        damaged = self.ws.get("ws-windows-list")
+        self.assertEqual([(a.app_id, a.mode) for a in damaged.apps], [("a", MODE_EMBEDDED)])
+        self.assertEqual((damaged.layout.windows, damaged.layout.tab_order, damaged.layout.active,
+                          damaged.layout.saved_at), ({}, [], "", 0.0))
+        self.assertEqual(self.ws.get("ws-windows-str").layout.tab_order, [])
+        self.assertEqual(self.ws.get("ws-tab-str").layout.tab_order, [])
+        self.assertEqual(self.ws.get("ws-tab-str").layout.windows, {})
+        self.assertEqual(self.ws.get("ws-bad-rect").layout.windows, {"c": {"rect": [1, 2, 3, 4], "maximized": True}})
+        self.assertEqual([(a.app_id, a.name, a.mode) for a in self.ws.get("ws-bad-app").apps],
+                         [("a", "a", MODE_EXTERNAL)])
+        self.assertIsNone(self.ws.get("ws-layout-list").layout)
+        self.assertEqual(self.ws.get("ws-layout-list").created, 0.0)
+        self.assertEqual(self.ws.active_id, "")
+        self.ws.rename("ws-apps-int", "Repaired")  # the cleaned data saves and reloads
+        self.build()
+        self.assertEqual(self.ws.get("ws-apps-int").name, "Repaired")
+
     def test_missing_application_keeps_its_stored_name(self):
         w = self.ws.create("W", [stable_app_id("Alpha")])
         self.registry.apply_scan([])  # Alpha vanished from the system

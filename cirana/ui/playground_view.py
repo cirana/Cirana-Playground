@@ -644,6 +644,9 @@ class PlaygroundView(QWidget):
         for page in list(self._pages.values()):
             if page.host.embedded is not None:
                 restored += 1 if page.detach() else 0
+        # A hung application may still hold its window inside a host: its recovery record has to survive this exit.
+        # Checked on every page (not only those detached just now) so that a repeated call keeps the record too.
+        pending = {sid for sid, page in self._pages.items() if page.host.restore_pending()}
         self.manager.shutdown()
-        self.manager.clear_persisted_state()
+        self.manager.clear_persisted_state(keep=pending)
         return restored

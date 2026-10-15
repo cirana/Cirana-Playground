@@ -62,6 +62,10 @@ class ApplicationRegistry(QObject):
         self.changed.emit()
 
     # -- queries ----------------------------------------------------------------
+    def discovered_apps(self) -> list[AppEntry]:
+        """The last scan result as stored (no custom applications, hidden ones included)."""
+        return list(self._discovered.values())
+
     def all_apps(self, include_hidden: bool = False) -> list[AppEntry]:
         hidden = set(self._over["hidden"])
         apps = [*self._custom.values(), *(a for a in self._discovered.values() if a.id not in self._custom)]

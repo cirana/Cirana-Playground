@@ -439,6 +439,61 @@ class PlaygroundUiTests(unittest.TestCase):
             self.assertEqual(self.view._limbo, [])
             self.assertFalse(self.view._limbo_timer.isActive())
 
+    def test_close_request_to_a_hung_application_never_deletes_its_host(self):
+        from cirana.widgets import native_host
+
+        session = self.open(self.add_app("Stuck"))
+        page = self.view._pages[session.id]
+        current_parent = [int(page.host.winId())]  # hung: the window is still a child of the host after the request
+        with mock.patch.object(embedder, "request_close", return_value=True) as close,                 mock.patch.object(native_host.w, "IsWindow", return_value=True),                 mock.patch.object(native_host.w, "GetParent", side_effect=lambda _h: current_parent[0]):
+            self.assertTrue(page.host.request_application_close())
+            close.assert_called_once()
+            self.assertTrue(page.host.restore_pending())
+            self.view.close_tab(session.id)
+            self.assertEqual(self.view._limbo, [page])  # kept alive (hidden) instead of deleted with the window
+            current_parent[0] = 0  # the application answered: its window left the host
+            self.assertFalse(page.host.restore_pending())
+            self.view._sweep_limbo()
+            self.assertEqual(self.view._limbo, [])
+
+    def test_close_request_without_a_pending_restore_still_deletes_the_host(self):
+        from cirana.widgets import native_host
+
+        session = self.open(self.add_app("Quick"))
+        page = self.view._pages[session.id]
+        with mock.patch.object(embedder, "request_close", return_value=True),                 mock.patch.object(native_host.w, "IsWindow", return_value=False):  # it closed right away
+            page.host.request_application_close()
+            self.assertFalse(page.host.restore_pending())
+            self.view.close_tab(session.id)
+        self.assertEqual(self.view._limbo, [])
+
+    def test_shutdown_keeps_the_recovery_record_of_a_window_not_yet_released(self):
+        from cirana.widgets import native_host
+
+        hung, fine = self.open(self.add_app("Frozen")), self.open(self.add_app("Fine"))
+        hung_host = int(self.view._pages[hung.id].host.winId())
+        restored = {fine.hwnd: True, hung.hwnd: False}
+        with mock.patch.object(embedder, "detach", side_effect=lambda e, activate=False: restored[e.hwnd]),                 mock.patch.object(native_host.w, "IsWindow", return_value=True),                 mock.patch.object(native_host.w, "GetParent",
+                                  side_effect=lambda h: hung_host if h == hung.hwnd else 0):
+            self.assertEqual(self.view.shutdown(), 1)
+            recorded = self.ctx.settings.playground_store.load()["embedded"]
+            self.assertEqual([(e["session"], e["pid"]) for e in recorded], [(hung.id, 4242)])
+            self.view.shutdown()  # a second call (Ctrl+C path, then closeEvent) must not forget it
+            self.assertEqual([e["session"] for e in self.ctx.settings.playground_store.load()["embedded"]], [hung.id])
+        self.manager.update_state(hung.id, SessionState.DETACHED)  # let the cleanup forget it
+
+    def test_shutdown_keeps_the_record_of_a_hung_window_detached_earlier(self):
+        from cirana.widgets import native_host
+
+        session = self.open(self.add_app("Frozen Earlier"))
+        host = int(self.view._pages[session.id].host.winId())
+        with mock.patch.object(embedder, "detach", return_value=False),                 mock.patch.object(native_host.w, "IsWindow", return_value=True),                 mock.patch.object(native_host.w, "GetParent", side_effect=lambda _h: host):
+            self.view.detach(session.id)  # not responding: the tab says detached, the window is still in the host
+            self.assertEqual(self.manager.get(session.id).state, SessionState.DETACHED)
+            self.view.shutdown()
+            self.assertEqual([e["session"] for e in self.ctx.settings.playground_store.load()["embedded"]],
+                             [session.id])
+
     def test_startup_orphan_check_never_ends_anything_without_confirmation(self):
         from PySide6.QtWidgets import QMessageBox
 

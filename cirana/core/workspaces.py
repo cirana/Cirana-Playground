@@ -6,6 +6,7 @@ This module has no widgets; the UI listens to ``changed`` / ``active_changed``.
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,17 @@ MODES = (MODE_EMBEDDED, MODE_EXTERNAL)
 MAX_NAME = 60
 
 
+def _number(value: Any) -> float:
+    """A stored timestamp, or 0 when it is missing or damaged."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return 0.0
+    try:
+        number = float(value)
+    except ValueError:
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 @dataclass
 class WorkspaceApp:
     app_id: str
@@ -39,8 +51,9 @@ class WorkspaceApp:
     def from_dict(cls, raw: Any) -> "WorkspaceApp | None":
         if not isinstance(raw, dict) or not isinstance(raw.get("app_id"), str) or not raw["app_id"]:
             return None
-        mode = raw.get("mode")
-        return cls(raw["app_id"], str(raw.get("name") or raw["app_id"]), mode if mode in MODES else MODE_EXTERNAL)
+        mode, name = raw.get("mode"), raw.get("name")
+        return cls(raw["app_id"], name if isinstance(name, str) and name else raw["app_id"],
+                   mode if isinstance(mode, str) and mode in MODES else MODE_EXTERNAL)
 
 
 @dataclass
@@ -61,15 +74,18 @@ class SavedLayout:
         if not isinstance(raw, dict):
             return None
         windows: dict[str, dict[str, Any]] = {}
-        for app_id, placement in (raw.get("windows") or {}).items():
+        raw_windows = raw.get("windows")
+        for app_id, placement in (raw_windows.items() if isinstance(raw_windows, dict) else ()):
             rect = placement.get("rect") if isinstance(placement, dict) else None
-            if isinstance(rect, list) and len(rect) == 4 and all(isinstance(v, int) for v in rect):
+            if isinstance(rect, list) and len(rect) == 4                     and all(isinstance(v, int) and not isinstance(v, bool) for v in rect):
                 windows[str(app_id)] = {"rect": rect, "maximized": bool(placement.get("maximized"))}
+        tab_order = raw.get("tab_order")
+        active = raw.get("active")
         return cls(
-            [str(i) for i in raw.get("tab_order", []) if isinstance(i, str)],
-            str(raw.get("active") or ""),
+            [i for i in tab_order if isinstance(i, str)] if isinstance(tab_order, list) else [],
+            active if isinstance(active, str) else "",
             windows,
-            float(raw.get("saved_at") or 0),
+            _number(raw.get("saved_at")),
         )
 
 
@@ -90,17 +106,20 @@ class Workspace:
 
     @classmethod
     def from_dict(cls, raw: Any) -> "Workspace | None":
-        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not str(raw.get("name") or "").strip():
+        name = raw.get("name") if isinstance(raw, dict) else None
+        name = str(name).strip() if isinstance(name, (str, int, float)) and not isinstance(name, bool) else ""
+        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not raw["id"] or not name:
             return None
         seen: set[str] = set()
         apps: list[WorkspaceApp] = []
-        for item in raw.get("apps", []):
+        raw_apps = raw.get("apps")
+        for item in (raw_apps if isinstance(raw_apps, list) else ()):
             app = WorkspaceApp.from_dict(item)
             if app and app.app_id not in seen:
                 seen.add(app.app_id)
                 apps.append(app)
-        return cls(raw["id"], str(raw["name"]).strip(), apps, SavedLayout.from_dict(raw.get("layout")),
-                   float(raw.get("created") or 0), float(raw.get("updated") or 0))
+        return cls(raw["id"], name, apps, SavedLayout.from_dict(raw.get("layout")),
+                   _number(raw.get("created")), _number(raw.get("updated")))
 
     def has(self, app_id: str) -> bool:
         return any(a.app_id == app_id for a in self.apps)
@@ -128,11 +147,15 @@ class WorkspaceManager(QObject):
         self._registry = registry
         self._workspaces: list[Workspace] = []
         for raw in settings.workspaces_store.load().get("workspaces", []):
-            workspace = Workspace.from_dict(raw)
+            try:
+                workspace = Workspace.from_dict(raw)
+            except Exception:  # noqa: BLE001 - one damaged record must not cost the others (or the app)
+                log.exception("Skipped a damaged workspace record")
+                continue
             if workspace and not any(w.id == workspace.id for w in self._workspaces):
                 self._workspaces.append(workspace)
-        active = settings.get("active_workspace") or ""
-        self._active = active if self.get(active) else ""
+        active = settings.get("active_workspace")
+        self._active = active if isinstance(active, str) and self.get(active) else ""
 
     # -- queries -----------------------------------------------------------------------------
     def all(self) -> list[Workspace]:

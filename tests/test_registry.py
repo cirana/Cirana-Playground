@@ -1,5 +1,8 @@
+from unittest import mock
+
+from cirana.core import application_scanner
 from cirana.core.application_registry import ApplicationRegistry
-from cirana.core.application_scanner import deduplicate
+from cirana.core.application_scanner import deduplicate, scan_applications
 from cirana.core.category_engine import CategoryEngine
 from cirana.core.models import AppEntry, stable_app_id
 from cirana.storage.settings_manager import SettingsManager
@@ -75,6 +78,67 @@ class RegistryTests(TempHomeTestCase):
         self.assertTrue(self.make().get(app.id).custom)
         reg.remove_custom_app(app.id)
         self.assertIsNone(self.make().get(app.id))
+
+
+class PartialScanTests(TempHomeTestCase):
+    """A scan source that fails must not wipe the applications it found before."""
+
+    def setUp(self):
+        super().setUp()
+        self.reg = ApplicationRegistry(SettingsManager(self.home))
+        self.reg.apply_scan([
+            entry("Alpha"), entry("Old Shortcut", source="start_menu_system"),
+            entry("Calc", launch="aumid", target="Microsoft.Calc!App", source="packaged"),
+            entry("Tool", launch="executable", target="C:\t\tool.exe", source="registry", exe="C:\t\tool.exe"),
+        ])
+
+    def scan(self, start_menu, packaged, registry):
+        from cirana.core.scan_controller import ScanController
+
+        with mock.patch.object(application_scanner, "scan_start_menu", side_effect=start_menu),                 mock.patch.object(application_scanner, "scan_packaged", side_effect=packaged),                 mock.patch.object(application_scanner, "scan_registry", side_effect=registry):
+            report = scan_applications(CategoryEngine())
+        ScanController(self.reg)._on_finished(report)
+        return report
+
+    def names(self):
+        return sorted(a.name for a in self.reg.discovered_apps())
+
+    def test_source_reporting_its_own_failure_keeps_its_previous_apps(self):
+        def packaged_failed(report):
+            report.errors.append("Get-StartApps failed: timeout")
+            return []
+
+        report = self.scan(lambda r: [entry("Alpha"), entry("Beta")], packaged_failed,
+                           lambda r: [entry("Tool", launch="executable", source="registry")])
+        self.assertEqual(report.failed_sources, {"packaged"})
+        # Calc survives (its source failed); Old Shortcut is gone (its source succeeded without it)
+        self.assertEqual(self.names(), ["Alpha", "Beta", "Calc", "Tool"])
+        self.assertEqual(report.counts["total"], 4)
+        reloaded = ApplicationRegistry(SettingsManager(self.home))  # the cache on disk keeps them too
+        self.assertIsNotNone(reloaded.get(stable_app_id("Calc")))
+
+    def test_raising_source_keeps_its_previous_apps_without_duplicates(self):
+        def start_menu_crashed(report):
+            raise OSError("COM unavailable")
+
+        # Alpha is also found by the registry now: the kept shortcut wins, no second "Alpha" appears
+        report = self.scan(start_menu_crashed, lambda r: [],
+                           lambda r: [entry("Alpha", launch="executable", source="registry")])
+        self.assertEqual(report.failed_sources, {"start_menu_user", "start_menu_system"})
+        self.assertEqual(self.names(), ["Alpha", "Old Shortcut"])
+        self.assertEqual(self.reg.get(stable_app_id("Alpha")).launch_type, "shortcut")
+
+    def test_successful_scan_still_removes_vanished_apps(self):
+        report = self.scan(lambda r: [entry("Alpha")], lambda r: [], lambda r: [])
+        self.assertEqual(report.failed_sources, set())
+        self.assertEqual(self.names(), ["Alpha"])
+
+    def test_total_failure_keeps_the_cache(self):
+        def failed(report):
+            raise RuntimeError("boom")
+
+        self.scan(failed, failed, failed)
+        self.assertEqual(self.names(), ["Alpha", "Calc", "Old Shortcut", "Tool"])
 
 
 class DedupeTests(TempHomeTestCase):

@@ -40,6 +40,7 @@ class ScanReport:
     counts: dict[str, int] = field(default_factory=dict)
     merged: list[tuple[str, str]] = field(default_factory=list)  # (kept, dropped description)
     errors: list[str] = field(default_factory=list)
+    failed_sources: set[str] = field(default_factory=set)  # AppEntry.source values whose discovery failed this time
 
 
 def start_menu_roots() -> list[tuple[Path, Source]]:
@@ -280,18 +281,29 @@ def deduplicate(entries: list[AppEntry], report: ScanReport | None = None) -> li
     return list(by_name.values())
 
 
+# Scan loop label -> the AppEntry.source values that loop produces.
+SOURCES_BY_LABEL: dict[str, tuple[str, ...]] = {
+    "start_menu": (Source.START_MENU_USER.value, Source.START_MENU_SYSTEM.value),
+    "packaged": (Source.PACKAGED.value,),
+    "registry": (Source.REGISTRY.value,),
+}
+
+
 def scan_applications(engine: CategoryEngine | None = None) -> ScanReport:
     """Run all discovery sources and return a deduplicated, categorized report."""
     report = ScanReport()
     engine = engine or CategoryEngine()
     collected: list[AppEntry] = []
     for label, func in (("start_menu", scan_start_menu), ("packaged", scan_packaged), ("registry", scan_registry)):
+        errors_before = len(report.errors)
         try:
             found = func(report)
         except Exception as exc:  # noqa: BLE001 - a failing source must not hide the others
             log.exception("Scan source %s failed", label)
             report.errors.append(f"{label}: {exc}")
             found = []
+        if not found and len(report.errors) > errors_before:  # raised, or reported its own failure
+            report.failed_sources.update(SOURCES_BY_LABEL[label])
         report.counts[label] = len(found)
         collected.extend(found)
     report.apps = deduplicate(collected, report)
