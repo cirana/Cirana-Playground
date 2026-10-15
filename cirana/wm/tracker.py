@@ -91,6 +91,7 @@ class _Relay(QObject):
     """Lives on the GUI thread; signals emitted from the probe thread are queued to it."""
 
     batch = Signal(object)
+    move_size = Signal(int, bool)  # hwnd, started (True) / ended (False)
 
 
 class _HookThread(threading.Thread):
@@ -121,7 +122,7 @@ class _HookThread(threading.Thread):
         self._callback = w.WINEVENTPROC(on_event)
         hooks = []
         for low, high in ((w.EVENT_SYSTEM_FOREGROUND, w.EVENT_SYSTEM_FOREGROUND),
-                          (w.EVENT_SYSTEM_MOVESIZEEND, w.EVENT_SYSTEM_MOVESIZEEND),
+                          (w.EVENT_SYSTEM_MOVESIZESTART, w.EVENT_SYSTEM_MOVESIZEEND),
                           (w.EVENT_SYSTEM_MINIMIZESTART, w.EVENT_SYSTEM_MINIMIZEEND),
                           (w.EVENT_OBJECT_CREATE, w.EVENT_OBJECT_HIDE),
                           (w.EVENT_OBJECT_LOCATIONCHANGE, w.EVENT_OBJECT_NAMECHANGE),
@@ -226,6 +227,9 @@ class WindowTracker(QObject):
     window_removed = Signal(object)  # the last known snapshot
     window_changed = Signal(object)
     foreground_changed = Signal(str)  # key of the new foreground application window ("" = something else)
+    # The user started (True) or finished (False) dragging or resizing a window with the mouse. Only the user's
+    # modal move loop reports these: SetWindowPos (CIRANA's own moves) never does.
+    move_size = Signal(object, bool)
     inventory_ready = Signal()  # the first full pass is in
 
     def __init__(self, backend: Backend | None = None, hooks: bool = True,
@@ -243,6 +247,7 @@ class WindowTracker(QObject):
         self._interval = interval
         self._relay = _Relay()
         self._relay.batch.connect(self._on_batch)
+        self._relay.move_size.connect(self._on_move_size)
         self._known: frozenset[int] = frozenset()  # read by the hook thread (replaced, never mutated)
         self._probe: _ProbeThread | None = None
         self._hooks: _HookThread | None = None
@@ -288,8 +293,16 @@ class WindowTracker(QObject):
     def _on_event(self, event: int, hwnd: int) -> None:
         from cirana.native import win32_api as w
 
+        if event in (w.EVENT_SYSTEM_MOVESIZESTART, w.EVENT_SYSTEM_MOVESIZEEND):
+            self._relay.move_size.emit(hwnd, event == w.EVENT_SYSTEM_MOVESIZESTART)  # queued to the GUI thread
         if self._probe is not None:
             self._probe.mark(hwnd, foreground=event == w.EVENT_SYSTEM_FOREGROUND)
+
+    @Slot(int, bool)
+    def _on_move_size(self, hwnd: int, started: bool) -> None:
+        window = self.inventory.by_hwnd(hwnd)
+        if window is not None:
+            self.move_size.emit(window, started)
 
     # -- results (GUI thread) ----------------------------------------------------------------------------------
     @Slot(object)

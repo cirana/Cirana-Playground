@@ -99,6 +99,7 @@ class Win32Backend:
             hwnd=hwnd, pid=facts.pid, process_created=created, exe=exe, aumid=aumid, title=facts.title,
             class_name=facts.class_name, owner=facts.owner, rect=self.frame_rect(hwnd), minimized=facts.minimized,
             maximized=bool(w.IsZoomed(hwnd)), content_exe=content_exe, content_aumid=content_aumid,
+            resizable=bool(facts.style & w.WS_THICKFRAME),
         )
 
     @staticmethod

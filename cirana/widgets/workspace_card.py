@@ -91,6 +91,12 @@ class WorkspaceCard(QFrame):
         head.addWidget(name, 1)
         if active:
             head.addWidget(label("Active", "ActivePill"))
+        if workspace.layout.dynamic and workspace.layout.tiled and not ctx.tiler.global_on:
+            tiling = label("Tiling", "StatePill")
+            tiling.setProperty("kind", "busy" if active else "idle")
+            tiling.setToolTip("Dynamic tiling is on: while this workspace is active, its windows are re-tiled as they "
+                              "open, close, minimize and restore")
+            head.addWidget(tiling)
         if ctx.wm.busy(workspace.id):
             head.addWidget(label("Working…", "StatusPill"))
         root.addLayout(head)

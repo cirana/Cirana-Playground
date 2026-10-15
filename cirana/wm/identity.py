@@ -132,6 +132,9 @@ class TrackedWindow:
     # A UWP window is an ApplicationFrameWindow of ApplicationFrameHost.exe; the app itself is its CoreWindow child.
     content_exe: str = ""
     content_aumid: str = ""
+    # It has a sizing border (WS_THICKFRAME). Fixed-size dialogs and borderless full-screen windows (games, videos)
+    # have none; all-window tiling leaves them floating.
+    resizable: bool = True
 
     @property
     def key(self) -> str:

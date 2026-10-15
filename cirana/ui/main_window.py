@@ -123,6 +123,9 @@ class MainWindow(QWidget):
         ctx.workspaces.active_changed.connect(self._on_active_workspace)
         ctx.wm.statuses_changed.connect(lambda _w: self._schedule_refresh(("home", "workspaces")))
         ctx.wm.busy_changed.connect(lambda _w, _b: self._schedule_refresh(("home", "workspaces")))
+        ctx.tiler.state_changed.connect(lambda _w: self._schedule_refresh(("home", "workspaces")))
+        ctx.tiler.reflowed.connect(lambda _w: self._schedule_refresh(("workspaces",)))
+        ctx.tiler.state_changed.connect(lambda _w: self._schedule_refresh(("workspaces", "windows")))
         ctx.wm.message.connect(self.show_toast)
         ctx.wm.choice_needed.connect(self._queue_choice)
         ctx.windows.inventory_ready.connect(self._schedule_refresh)
@@ -284,6 +287,7 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Managed windows are ordinary windows: nothing has to be handed back, they simply stay where they are.
+        self.ctx.tiler.stop()
         self.ctx.settings.set("window_geometry", bytes(self.saveGeometry().toBase64()).decode("ascii"))
         self.ctx.windows.stop()
         self.ctx.tracker.shutdown()

@@ -13,7 +13,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QByteArray, QMimeData  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from cirana.core.models import AppEntry, stable_app_id  # noqa: E402
 from cirana.core.workspace_controller import EntryState  # noqa: E402
@@ -166,6 +166,30 @@ class UiTests(unittest.TestCase):
         self.assertEqual(other.rect, (1, 1, 300, 300))
         self.assertEqual(self.ctx.workspaces.active_id, workspace.id)
 
+    def test_dynamic_tiling_switch(self):
+        workspace = self.ctx.workspaces.create("Tiles", [stable_app_id("Alpha")])
+        self.show(workspace.id)
+        self.assertFalse(self.view.dynamic_check.isChecked())
+        self.view.dynamic_check.setChecked(True)
+        self.assertTrue(self.ctx.workspaces.get(workspace.id).layout.dynamic)
+        self.view.refresh()
+        self.assertIn("starts when this workspace is activated", self.view.tiling_state.text())
+        self.ctx.workspaces.set_active(workspace.id)
+        self.view.refresh()
+        self.assertIn("following", self.view.tiling_state.text())
+        self.assertIn("tiling", self.view.subtitle.text())
+        self.view.gap_spin.setValue(12)  # editing the layout keeps the switch
+        self.assertTrue(self.ctx.workspaces.get(workspace.id).layout.dynamic)
+        self.view.kind_combo.setCurrentIndex(4)  # saved positions cannot be tiled
+        self.view.refresh()
+        self.assertFalse(self.view.dynamic_check.isEnabled())
+        self.assertFalse(self.ctx.tiler.manages(workspace.id))
+        self.view.kind_combo.setCurrentIndex(0)
+        self.view.refresh()
+        self.view.dynamic_check.setChecked(False)
+        self.assertFalse(self.ctx.workspaces.get(workspace.id).layout.dynamic)
+        self.ctx.workspaces.set_active("")
+
     # -- drag and drop -------------------------------------------------------------------------------------------
     def test_dragging_an_application_onto_a_workspace_adds_it(self):
         from cirana.widgets.workspace_card import WorkspaceCard
@@ -283,6 +307,32 @@ class UiTests(unittest.TestCase):
         page._add(workspace.id, self.ctx.windows.get(self.desktop.tracked(win.hwnd).key))
         self.assertEqual(len(self.ctx.workspaces.get(workspace.id).apps), 1)
         self.assertIn("Notes - Editor", self.window.toast.text())
+
+    def test_windows_page_switches_all_window_tiling(self):
+        win = self.desktop.add("c:\\tools\\editor.exe", "Notes - Editor")
+        self.sync()
+        self.window.show_page("windows", save=False)
+        page = self.window.pages["windows"]
+        page.refresh()
+        self.assertFalse(page.tile_all.isChecked())
+        self.assertIn("Off", page.tiling_state.text())
+        page.tiling_kind.setCurrentIndex(0)  # side by side
+        page.tile_all.setChecked(True)
+        self.assertTrue(self.ctx.settings.get("global_tiling"))
+        work = self.desktop.monitors_[0].work
+        self.assertTrue(self.pump(lambda: win.rect == (work[0] + 8, work[1] + 8, work[2] - 8, work[3] - 8)))
+        page.refresh()
+        self.assertIn("1 window tiled", page.tiling_state.text())
+        from cirana.ui.windows_view import WindowRow
+
+        self.flush()
+        row = page.rows_host.findChildren(WindowRow)[0]
+        self.assertIn("· tiled", " ".join(text.text() for text in row.findChildren(QLabel)))
+        self.ctx.tiler.set_floating("editor.exe", True)
+        self.assertIn("editor.exe", self.ctx.settings.get("tiling_exclusions"))
+        self.ctx.tiler.set_floating("editor.exe", False)
+        page.tile_all.setChecked(False)
+        self.assertFalse(self.ctx.settings.get("global_tiling"))
 
     def test_home_shows_workspace_cards_with_activate(self):
         from cirana.widgets.workspace_card import WorkspaceCard

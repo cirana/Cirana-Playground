@@ -157,6 +157,9 @@ QLabel#StatePill[kind="busy"] { color: @accent; border-color: @accent_line; }
 QLabel#StatePill[kind="warn"] { color: @warn; border-color: @warn; background: @warn_soft; }
 QLabel#StatePill[kind="bad"] { color: @bad; border-color: @bad; background: @bad_soft; }
 QLabel#RowWarning { color: @warn; font-size: 12px; }
+QLabel#TilingState { color: @text2; font-size: 12px; }
+QLabel#TilingState[kind="good"] { color: @good; }
+QLabel#TilingState[kind="warn"] { color: @warn; }
 QLabel#IdleDot { background: @border; border-radius: 4px; }
 QLabel#IconTile[dim="true"] { background: transparent; border: 1px dashed @border; }
 QFrame#DropBar { background: @panel; border: 1px solid @accent_line; border-radius: 12px; }

@@ -188,3 +188,179 @@ class LiveWorkspaceTests(unittest.TestCase):
             self.app.processEvents()
             time.sleep(0.05)
         self.assertLessEqual(max(abs(a - b) for a, b in zip(tracker.backend.frame_rect(hwnd), target)), 2)
+
+
+@unittest.skipUnless(LIVE, "live desktop test: set CIRANA_LIVE=1")
+class LiveDynamicTilingTests(unittest.TestCase):
+    """Real windows, real WinEvent hooks: closing one tiled window makes the other fill the screen by itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        LiveWindowManagerTests.setUpClass()
+        cls.app = QApplication.instance()
+
+    def wait(self, condition, timeout=8.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.app.processEvents()
+            if condition():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_windows_closing_retile_by_themselves(self):
+        from pathlib import Path
+
+        from cirana.core.application_registry import ApplicationRegistry
+        from cirana.core.dynamic_tiling import DynamicTiler
+        from cirana.core.workspace_controller import WorkspaceController
+        from cirana.core.workspace_launcher import WorkspaceLauncher
+        from cirana.core.workspaces import WorkspaceManager
+        from cirana.native import win32_api as w
+        from cirana.storage.settings_manager import SettingsManager
+        from cirana.wm.controller import WindowController
+        from cirana.wm.layout import SIDE_BY_SIDE, LayoutSpec, tile
+        from cirana.wm.tracker import WindowTracker
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        home = tempfile.mkdtemp(prefix="cirana-live-tiling-")
+        helpers = []
+        for _ in range(2):
+            proc = subprocess.Popen([sys.executable, "-m", "tests.hang_window_helper", os.path.join(home, "x"), "1"],
+                                    stdout=subprocess.PIPE, text=True, cwd=root)
+            helpers.append((proc, int(proc.stdout.readline().split()[1])))
+        for proc, hwnd in helpers:
+            self.addCleanup(proc.stdout.close)
+            self.addCleanup(proc.wait, 10)
+            self.addCleanup(w.PostMessageW, hwnd, w.WM_CLOSE, 0, 0)  # politely, our own helpers only
+
+        settings = SettingsManager(Path(home))
+        registry = ApplicationRegistry(settings)
+        tracker = WindowTracker(hooks=True, interval=60)  # a long reconcile: the close must come from the hook
+        tracker.start()
+        self.addCleanup(tracker.stop)
+        self.assertTrue(self.wait(lambda: tracker.ready and all(tracker.inventory.by_hwnd(h) for _p, h in helpers)))
+        manager = WorkspaceManager(settings, registry, monitors=tracker.backend.monitors)
+        wm = WorkspaceController(manager, registry, tracker, WindowController(tracker.backend),
+                                 WorkspaceLauncher(registry, tracker))
+        tiler = DynamicTiler(wm)
+        self.addCleanup(tiler.stop)
+        workspace = manager.create("Live tiling")
+        for _proc, hwnd in helpers:
+            window = tracker.inventory.by_hwnd(hwnd)
+            entry = manager.add_window(workspace.id, window)
+            wm.choose(workspace.id, entry.id, window.key, place=False)
+        manager.set_layout(workspace.id, LayoutSpec(SIDE_BY_SIDE, gap=10, dynamic=True))
+        manager.set_active(workspace.id)
+
+        monitor = tracker.backend.monitors()[0]
+        two = tile(LayoutSpec(SIDE_BY_SIDE, gap=10), monitor.work, 2, monitor.scale)
+        one = tile(LayoutSpec(SIDE_BY_SIDE, gap=10), monitor.work, 1, monitor.scale)
+
+        def at(hwnd, rect):
+            return max(abs(a - b) for a, b in zip(tracker.backend.frame_rect(hwnd), rect)) <= 2
+
+        self.assertTrue(self.wait(lambda: at(helpers[0][1], two[0]) and at(helpers[1][1], two[1])))
+        w.PostMessageW(helpers[0][1], w.WM_CLOSE, 0, 0)  # the first window closes
+        self.assertTrue(self.wait(lambda: at(helpers[1][1], one[0])), "the other window did not fill the gap")
+        retiles = tiler.count
+        time.sleep(0.5)
+        self.wait(lambda: False, timeout=1.0)
+        self.assertEqual(tiler.count, retiles)  # settled: its own moves did not start another round
+
+
+@unittest.skipUnless(LIVE, "live desktop test: set CIRANA_LIVE=1")
+class LiveGlobalTilingTests(unittest.TestCase):
+    """All-window tiling on the real desktop, without any workspace. To keep the user's own windows untouched, every
+    program except the test helper is marked floating for the duration of the test (in a temporary data folder)."""
+
+    @classmethod
+    def setUpClass(cls):
+        LiveWindowManagerTests.setUpClass()
+        cls.app = QApplication.instance()
+
+    def wait(self, condition, timeout=8.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.app.processEvents()
+            if condition():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_all_windows_tile_and_refill_without_a_workspace(self):
+        from pathlib import Path
+
+        from cirana.core.application_registry import ApplicationRegistry
+        from cirana.core.dynamic_tiling import DynamicTiler
+        from cirana.core.workspace_controller import WorkspaceController
+        from cirana.core.workspace_launcher import WorkspaceLauncher
+        from cirana.core.workspaces import WorkspaceManager
+        from cirana.native import win32_api as w
+        from cirana.storage.settings_manager import SettingsManager
+        from cirana.wm.controller import WindowController
+        from cirana.wm.layout import SIDE_BY_SIDE, LayoutSpec, tile
+        from cirana.wm.tracker import WindowTracker
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        home = tempfile.mkdtemp(prefix="cirana-live-global-")
+        settings = SettingsManager(Path(home))
+        registry = ApplicationRegistry(settings)
+        tracker = WindowTracker(hooks=True, interval=60)
+        tracker.start()
+        self.addCleanup(tracker.stop)
+        self.assertTrue(self.wait(lambda: tracker.ready))
+        helper_name = os.path.basename(sys.executable).lower()
+        # never arrange the user's windows during a test: float everything that is not the helper's program
+        others = {win.exe_name.lower() for win in tracker.windows()} - {helper_name, ""}
+        settings.set("tiling_exclusions", sorted(others))
+
+        helpers = []
+        for _ in range(2):
+            proc = subprocess.Popen([sys.executable, "-m", "tests.hang_window_helper", os.path.join(home, "x"), "1"],
+                                    stdout=subprocess.PIPE, text=True, cwd=root)
+            helpers.append((proc, int(proc.stdout.readline().split()[1])))
+        for proc, hwnd in helpers:
+            self.addCleanup(proc.stdout.close)
+            self.addCleanup(proc.wait, 10)
+            self.addCleanup(w.PostMessageW, hwnd, w.WM_CLOSE, 0, 0)  # politely, our own helpers only
+        self.assertTrue(self.wait(lambda: all(tracker.inventory.by_hwnd(h) for _p, h in helpers)))
+        if any(tracker.inventory.by_hwnd(h).exe_name.lower() != helper_name for _p, h in helpers):
+            self.skipTest("the helper runs under another interpreter image than expected")
+        unrelated = [win for win in tracker.windows() if win.exe_name.lower() != helper_name]
+        before = {win.hwnd: tracker.backend.frame_rect(win.hwnd) for win in unrelated}
+
+        manager = WorkspaceManager(settings, registry, monitors=tracker.backend.monitors)
+        wm = WorkspaceController(manager, registry, tracker, WindowController(tracker.backend),
+                                 WorkspaceLauncher(registry, tracker))
+        tiler = DynamicTiler(wm, settings)
+        self.addCleanup(tiler.stop)
+        tiler.set_global_layout(LayoutSpec(SIDE_BY_SIDE, gap=10))
+        tiler.set_global(True)
+
+        monitors = tracker.backend.monitors()
+        home_of = {h: next(m for m in monitors if m.device == tiler._home.get(tracker.inventory.by_hwnd(h).key,
+                                                                               monitors[0].device))
+                   for _p, h in helpers}
+
+        def at(hwnd, rect):
+            return max(abs(a - b) for a, b in zip(tracker.backend.frame_rect(hwnd), rect)) <= 2
+
+        def tiled_alone_or_together():
+            if not all(tiler._home.get(tracker.inventory.by_hwnd(h).key) for _p, h in helpers):
+                return False
+            same = len({home_of[h].device for _p, h in helpers}) == 1
+            if same:
+                rects = tile(LayoutSpec(SIDE_BY_SIDE, gap=10), home_of[helpers[0][1]].work, 2,
+                             home_of[helpers[0][1]].scale)
+                return {tuple(tracker.backend.frame_rect(h)) for _p, h in helpers} == set(rects) or all(
+                    any(at(h, r) for r in rects) for _p, h in helpers)
+            return all(at(h, tile(LayoutSpec(gap=10), home_of[h].work, 1, home_of[h].scale)[0]) for _p, h in helpers)
+
+        self.assertTrue(self.wait(tiled_alone_or_together), "the two windows were not tiled")
+        survivor = helpers[1][1]
+        w.PostMessageW(helpers[0][1], w.WM_CLOSE, 0, 0)
+        alone = tile(LayoutSpec(gap=10), home_of[survivor].work, 1, home_of[survivor].scale)[0]
+        self.assertTrue(self.wait(lambda: at(survivor, alone)), "the remaining window did not fill the screen")
+        self.assertEqual({hwnd: tracker.backend.frame_rect(hwnd) for hwnd in before if w.IsWindow(hwnd)},
+                         {hwnd: rect for hwnd, rect in before.items() if w.IsWindow(hwnd)})  # nothing else moved

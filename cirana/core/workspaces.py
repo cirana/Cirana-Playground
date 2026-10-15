@@ -365,6 +365,22 @@ class WorkspaceManager(QObject):
         workspace.apps.insert(index, workspace.apps.pop(current))
         self._touch_save(workspace)
 
+    def swap_entries(self, workspace_id: str, first_id: str, second_id: str) -> None:
+        """Exchange two entries' places (a tiled window dropped onto another one)."""
+        workspace = self._require(workspace_id)
+        ids = [a.id for a in workspace.apps]
+        if first_id in ids and second_id in ids and first_id != second_id:
+            i, j = ids.index(first_id), ids.index(second_id)
+            workspace.apps[i], workspace.apps[j] = workspace.apps[j], workspace.apps[i]
+            self._touch_save(workspace)
+
+    def set_dynamic(self, workspace_id: str, on: bool) -> None:
+        """Dynamic tiling on / off for this workspace (kept with its layout)."""
+        workspace = self._require(workspace_id)
+        if workspace.layout.dynamic != on:
+            workspace.layout.dynamic = on
+            self._touch_save(workspace)
+
     def set_launch(self, workspace_id: str, entry_id: str, launch: bool) -> None:
         workspace = self._require(workspace_id)
         entry = workspace.entry(entry_id)

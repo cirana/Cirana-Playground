@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from cirana.core.application_registry import ApplicationRegistry
+from cirana.core.dynamic_tiling import DynamicTiler
 from cirana.core.process_tracker import ProcessTracker
 from cirana.core.scan_controller import ScanController
 from cirana.core.workspace_controller import WorkspaceController
@@ -49,6 +50,7 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
     workspaces = WorkspaceManager(settings, registry, monitors=windows.backend.monitors)
     actions.workspaces = workspaces
     wm = WorkspaceController(workspaces, registry, windows, window_control, WorkspaceLauncher(registry, windows))
+    tiler = DynamicTiler(wm, settings)
     ctx = AppContext(
         settings=settings,
         registry=registry,
@@ -60,10 +62,12 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
         windows=windows,
         window_control=window_control,
         wm=wm,
+        tiler=tiler,
     )
     window = MainWindow(ctx)
     tracker.set_apps(registry.all_apps())
     registry.changed.connect(lambda: tracker.set_apps(registry.all_apps()))
+    app.aboutToQuit.connect(tiler.stop)  # first: nothing is arranged any more while CIRANA shuts down
     app.aboutToQuit.connect(windows.stop)
     app.aboutToQuit.connect(tracker.shutdown)
     app.aboutToQuit.connect(scanner.shutdown)

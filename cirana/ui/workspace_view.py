@@ -281,6 +281,14 @@ class WorkspaceView(QWidget):
         spins.addWidget(self.gap_spin)
         spins.addWidget(self.ratio_spin)
         controls.addLayout(spins)
+        self.dynamic_check = QCheckBox("Dynamic tiling")
+        self.dynamic_check.setToolTip(
+            "While this workspace is active, re-tile its windows automatically whenever one opens, closes, is "
+            "minimized or restored. Only windows that clearly belong to the workspace are arranged.")
+        self.dynamic_check.toggled.connect(self._dynamic_toggled)
+        controls.addWidget(self.dynamic_check)
+        self.tiling_state = label("", "TilingState")
+        controls.addWidget(self.tiling_state)
         self.layout_hint = label("", "Muted", wrap=True)
         controls.addWidget(self.layout_hint)
         controls.addStretch(1)
@@ -356,8 +364,9 @@ class WorkspaceView(QWidget):
         self.title.setText(current.name)
         open_count = sum(1 for s in statuses if s.window is not None)
         count = len(statuses)
+        tiling = " · tiling" if ctx.tiler.manages(current.id) else ""
         self.subtitle.setText(f"{count} window{'s' if count != 1 else ''} · {open_count} open"
-                              + (" · active" if active else "") + (" · working…" if busy else ""))
+                              + (" · active" if active else "") + tiling + (" · working…" if busy else ""))
         self.activate_button.setEnabled(bool(statuses))
         self.apply_button.setEnabled(open_count > 0)
         self.front_button.setEnabled(open_count > 0)
@@ -390,18 +399,46 @@ class WorkspaceView(QWidget):
             self.monitor_combo.setCurrentIndex(chosen)
             self.gap_spin.setValue(spec.gap)
             self.ratio_spin.setValue(round(spec.ratio * 100))
+            self.dynamic_check.setChecked(spec.dynamic)
         finally:
             self._syncing = False
         free = spec.kind == FREE
         self.ratio_spin.setVisible(spec.kind == MAIN_SIDE)
         self.monitor_combo.setEnabled(not free)
         self.gap_spin.setEnabled(not free)
-        self.layout_hint.setText(
-            "Windows go back where they were when you chose “Save current positions” (⋯ menu)." if free else
-            "Applied only when you activate or press Apply layout; move windows freely afterwards.")
-        placeable = [s for s in statuses if s.placeable]
+        self.dynamic_check.setEnabled(not free)
+        tiler = self.ctx.tiler
+        if tiler.global_on:
+            state, kind = "All windows are tiled (Windows page); that layout is in charge", "good"
+        elif free:
+            state, kind = ("Dynamic tiling works with tiled layouts only" if spec.dynamic else ""), "idle"
+        elif not spec.dynamic:
+            state, kind = "", "idle"
+        elif tiler.paused(workspace.id):
+            state, kind = "Tiling paused while you move a window", "warn"
+        elif tiler.manages(workspace.id):
+            state, kind = "Tiling: on, following this workspace's windows", "good"
+        else:
+            state, kind = "Tiling: on, starts when this workspace is activated", "idle"
+        self.tiling_state.setText(state)
+        self.tiling_state.setVisible(bool(state))
+        self.tiling_state.setProperty("kind", kind)
+        repolish(self.tiling_state)
+        if free:
+            hint = "Windows go back where they were when you chose “Save current positions” (⋯ menu)."
+        elif spec.dynamic:
+            hint = ("Minimized and maximized windows are left out until restored. Drag a window onto another one "
+                    "to swap them.")
+        else:
+            hint = "Applied only when you activate or press Apply layout; move windows freely afterwards."
+        self.layout_hint.setText(hint)
+        if tiler.manages(workspace.id):  # what dynamic tiling lays out right now
+            tiled = {entry_id for entry_id, _window in tiler.tile_set(workspace.id)}
+            shown = [s for s in statuses if s.entry.id in tiled]
+        else:  # what activating would lay out
+            shown = [s for s in statuses if s.placeable]
         monitor = resolve(spec.monitor, monitors)
-        self.preview.set_layout(spec, [(s.entry.id, self.ctx.workspaces.display_name(s.entry)) for s in placeable],
+        self.preview.set_layout(spec, [(s.entry.id, self.ctx.workspaces.display_name(s.entry)) for s in shown],
                                 monitor.work if monitor else None)
 
     def _layout_edited(self, _value: object = None) -> None:
@@ -414,9 +451,20 @@ class WorkspaceView(QWidget):
         old = workspace.layout
         spec = LayoutSpec(kind=kind, gap=self.gap_spin.value(), ratio=self.ratio_spin.value() / 100,
                           columns=columns, weights=list(old.weights), monitor=self.monitor_combo.currentData(),
-                          free=dict(old.free))
+                          free=dict(old.free), dynamic=old.dynamic)
         if spec.to_dict() != old.to_dict():
             self.ctx.workspaces.set_layout(workspace.id, spec)
+
+    def _dynamic_toggled(self, on: bool) -> None:
+        if self._syncing or not self.ctx.workspaces.get(self._selected):
+            return
+        self.ctx.workspaces.set_dynamic(self._selected, on)
+        if on and self.ctx.tiler.reflow(self._selected):
+            self.ctx.actions.message.emit("Dynamic tiling is on: the windows follow the layout by themselves")
+        elif on:
+            self.ctx.actions.message.emit("Dynamic tiling is on; it takes over when this workspace is activated")
+        else:
+            self.ctx.actions.message.emit("Dynamic tiling is off: windows stay where they are")
 
     def select(self, workspace_id: str) -> None:
         if workspace_id != self._selected and self.ctx.workspaces.get(workspace_id):

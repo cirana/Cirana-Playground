@@ -18,6 +18,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "last_page": "home",
     "window_geometry": "",
     "active_workspace": "",
+    # Tiling of every application window (not only a workspace's): on / off, its layout, programs left floating.
+    "global_tiling": False,
+    "global_layout": {},
+    "tiling_exclusions": [],
 }
 
 

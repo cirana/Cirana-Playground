@@ -112,6 +112,7 @@ class WorkspaceController(QObject):
         self._messages: dict[tuple[str, str], str] = {}  # (workspace id, entry id) -> last problem
         self._slot_order: dict[str, list[str]] = {}  # workspace id -> entry ids that share the tiled layout
         self._busy: dict[str, int] = {}
+        self.tiler = None  # cirana.core.dynamic_tiling.DynamicTiler, when it is attached
         self._shown: dict[str, tuple] = {}  # window key -> (title, minimized, maximized) last reported
         self._notify = QTimer(self, singleShot=True, interval=60)  # coalesces bursts of window events
         self._notify.timeout.connect(lambda: self.statuses_changed.emit(""))
@@ -329,8 +330,28 @@ class WorkspaceController(QObject):
         order = self._slot_order.get(workspace.id) or [s.entry.id for s in statuses.values() if s.placeable]
         return [(entry_id, statuses[entry_id].window) for entry_id in order if entry_id in statuses]
 
+    def set_entry_message(self, workspace_id: str, entry_id: str, message: str) -> bool:
+        """Show (or clear, with "") the last problem on an entry's row. True when it changed."""
+        key = (workspace_id, entry_id)
+        if self._messages.get(key, "") == message:
+            return False
+        if message:
+            self._messages[key] = message
+        else:
+            self._messages.pop(key, None)
+        return True
+
     def apply_layout(self, workspace_id: str, only: set[str] | None = None, raise_group: bool = False) -> bool:
-        """Arrange the workspace's open windows (``only``: just these entries). Runs on a worker thread."""
+        """Arrange the workspace's open windows (``only``: just these entries). Runs on a worker thread.
+
+        With dynamic tiling in charge of the workspace the whole layout is re-tiled instead (over the windows that
+        are actually there, so no place is kept for one that is still starting)."""
+        if self.tiler is not None and self.tiler.global_on:
+            # All-window tiling is in charge of every window: re-tile, and raise this workspace's windows if asked.
+            group = [s.window for s in self.statuses(workspace_id) if s.window is not None] if raise_group else False
+            return self.tiler.reflow(raise_group=group or False)
+        if self.tiler is not None and self.tiler.manages(workspace_id):
+            return self.tiler.reflow(workspace_id, raise_group)
         workspace = self.workspaces.get(workspace_id)
         if workspace is None:
             return False

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from cirana.core.application_registry import ApplicationRegistry
+from cirana.core.dynamic_tiling import DynamicTiler
 from cirana.core.process_tracker import ProcessTracker
 from cirana.core.scan_controller import ScanController
 from cirana.core.workspace_controller import WorkspaceController
@@ -27,6 +28,7 @@ class AppContext:
     windows: WindowTracker  # live inventory of the desktop's application windows
     window_control: WindowController
     wm: WorkspaceController  # workspaces at runtime: bindings, activation, layouts
+    tiler: DynamicTiler  # re-tiles the active workspace as its windows come and go (when switched on)
 
     @property
     def view_mode(self) -> str:

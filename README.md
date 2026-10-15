@@ -57,6 +57,7 @@ cirana/core/
   workspaces.py           workspace model v2, storage, v1 migration (WorkspaceManager)
   workspace_controller.py runtime: entry ↔ window bindings, activation, layouts, saved positions
   workspace_launcher.py   starts missing applications and attributes their new windows
+  dynamic_tiling.py       DynamicTiler: re-tiles the active workspace as its windows come and go
   legacy_recovery.py      one-time clean-up after the old embedding versions
 cirana/ui/                pages: Home, Applications, Workspaces, Windows, Favorites, Settings
 cirana/widgets/           workspace_card, layout_preview, app cards, drag and drop payloads
@@ -130,6 +131,46 @@ cirana/widgets/           workspace_card, layout_preview, app cards, drag and dr
   closing the workspace cancels the session and its late launch results and windows are dropped (generation token).
   No window after 30 s (60 s while the started process runs): reported, the process is left alone.
 
+### Dynamic tiling (`core/dynamic_tiling.py`)
+
+**All windows (Windows page → *Tile all windows*).** Every application window on the desktop is tiled, workspace or
+not, Komorebi-style: one layout per monitor (side by side, main + side panel, grid 2×2, dynamic grid; gap and main
+width), windows in the order they appeared, each on the monitor it opened on. Windows without a sizing border (fixed
+dialogs, borderless full-screen games and videos), minimized and maximized windows, windows Windows will not let
+CIRANA move, and programs you mark *floating* (the unlink button on a window's row; stored as `tiling_exclusions`)
+are left alone. Dragging a tile onto another swaps them; dropping it on another monitor moves it to that monitor's
+layout. The switch, the layout and the floating programs are kept in `config.json`. While it is on it is in charge of
+every window: a workspace's own tiling steps aside, and activating a workspace still opens and raises its
+applications. Everything below (triggers, no loop, drags, refusals, cancellation) applies to both scopes.
+
+**One workspace.** A per-workspace switch (*Dynamic tiling* in the layout panel, stored with the layout as `"dynamic"`; records written
+before it existed read as off). While it is on **and** the workspace is the active one, its tiled layout (side by
+side, main + side panel, grids) follows its windows by itself:
+
+| Event | What happens |
+|---|---|
+| A window of the workspace opens (launched, recognised by its rule, chosen by you, or re-created by its app) | It gets a tile; the others make room. |
+| One closes | The others fill the gap. |
+| One is minimized or maximized | It leaves the layout until it is restored; CIRANA never changes its state. |
+| You drag or resize a tiled window | Nothing is re-tiled until you let go (a running re-tile is cancelled). Dropped onto another tile: the two swap places (the order is saved). Otherwise it goes back to its tile. |
+| Layout settings, entry order or monitors change | Re-tiled once. |
+| Another workspace becomes active | Only the active one is managed; the others' windows are left where they are. |
+
+* Triggered by the WinEvent hooks through the tracker (open / close / show / hide / cloak, minimize start / end,
+  move-size start / end). Bursts are coalesced (150 ms), so several windows opening at once or a re-created window
+  (removed + added) give one re-tile.
+* **No loop:** a re-tile only runs when the tile set's signature changes (entries, their window keys, the layout
+  settings). Window *movements*, including CIRANA's own, are never a trigger. A rate limit (8 re-tiles per 4 s, then
+  a 2 s pause) is a second safeguard against applications that react to being moved.
+* **Only reliable windows** take part: those bound to an entry unambiguously (or by your choice). Unrelated windows
+  and windows several entries could claim are never touched. A recycled handle is never moved.
+* Windows Windows will not let CIRANA move (higher rights) are left out so the others fill the screen, a hung window
+  is skipped for that round, fixed-size and minimum-size windows keep their size; each problem shows on its row and
+  is reported once. Multi-monitor and DPI handling are the same as for *Apply layout*.
+* Every re-tile is a cancellable worker job with a generation; switching workspace, a drag, a newer re-tile or
+  quitting drops it and its late result. With tiling off, *Apply layout* and activation behave exactly as before;
+  with it on, *Apply layout* re-tiles over the windows that are actually there. When CIRANA closes, windows stay put.
+
 ### Interface (phase 4)
 
 * **Home:** workspace cards with the applications' icons, a dot per open window, "n of m open" and *Activate*.
@@ -182,6 +223,10 @@ and nothing to recover after a crash.
 * Applications that restore their own window position after starting (some browsers, Electron apps) may move after
   CIRANA placed them; *Apply layout* arranges them again.
 * Windows on other virtual desktops are cloaked and therefore not listed.
+* Dynamic tiling reacts to the mouse move loop only: a window moved with the keyboard (Win+Arrow snapping) or by the
+  application itself stays where it went until the next change of the workspace's windows re-tiles it. Dragging
+  onto another tile swaps the two; resizing does not change the layout's proportions (the window snaps back).
+* Real mouse drags of tiled windows were tested with simulated move-loop events, not with a physical drag.
 * Discovery names come from shortcut names; categorization is heuristic.
 
 ## Build an EXE

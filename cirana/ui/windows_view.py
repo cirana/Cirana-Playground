@@ -1,4 +1,5 @@
-"""Windows page: every application window that is open right now (live), with quick actions.
+"""Windows page: every application window that is open right now (live), with quick actions, and the switch for
+tiling all of them (cirana.core.dynamic_tiling, all-window scope).
 
 The list comes from the window tracker, so it follows windows as they open, close, move and change their title,
 and building it never waits for an application.
@@ -8,7 +9,8 @@ from __future__ import annotations
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizePolicy, QSpinBox, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from cirana.core.background import run_async
@@ -18,7 +20,11 @@ from cirana.ui.dialogs import window_icon_app, window_subtitle
 from cirana.ui.icons import icon
 from cirana.ui.theme import TEXT2
 from cirana.wm.identity import TrackedWindow
+from cirana.wm.layout import GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
 from cirana.wm.monitors import monitor_for_rect
+
+TILING_CHOICES = [("Side by side", SIDE_BY_SIDE, 0), ("Main + side panel", MAIN_SIDE, 0), ("Grid 2×2", GRID, 2),
+                  ("Dynamic grid", GRID, 0)]
 
 
 def _tool(glyph: str, tip: str) -> QToolButton:
@@ -54,6 +60,10 @@ class WindowRow(QFrame):
         meta = window_subtitle(window) + (f" · {where}" if where else "")
         if groups:
             meta += " · in " + ", ".join(groups)
+        tiler = ctx.tiler
+        if tiler.global_on:
+            reason = tiler.float_reason(window)
+            meta += f" · {reason}" if reason else " · tiled"
         sub = label(meta, "AppCategory")
         sub.setToolTip(window.app_exe)
         sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -68,6 +78,13 @@ class WindowRow(QFrame):
             button = _tool(glyph, tip)
             button.clicked.connect(handler)
             row.addWidget(button)
+        floating = window.exe_name.lower() in ctx.tiler.exclusions()
+        float_button = _tool("link" if floating else "unlink",
+                             f"Tile {window.exe_name} again" if floating else
+                             f"Leave {window.exe_name} floating (all-window tiling does not arrange it)")
+        float_button.clicked.connect(lambda: ctx.tiler.set_floating(window.exe_name, not floating))
+        float_button.setEnabled(bool(window.exe_name))
+        row.addWidget(float_button)
         add = _tool("plus", "Add to a workspace")
         add.clicked.connect(lambda: view.show_add_menu(window, add.mapToGlobal(add.rect().bottomLeft())))
         row.addWidget(add)
@@ -77,6 +94,7 @@ class WindowsView(QWidget):
     def __init__(self, ctx: AppContext) -> None:
         super().__init__()
         self.ctx = ctx
+        self._syncing = False
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(12)
@@ -94,6 +112,7 @@ class WindowsView(QWidget):
         self.filter.textChanged.connect(lambda _t: self.refresh())
         head.addWidget(self.filter)
         root.addLayout(head)
+        root.addWidget(self._tiling_panel())
         self.rows_host = QWidget()
         self.rows = QVBoxLayout(self.rows_host)
         self.rows.setContentsMargins(0, 0, 4, 0)
@@ -110,6 +129,85 @@ class WindowsView(QWidget):
         for signal in (ctx.windows.window_added, ctx.windows.window_removed, ctx.windows.window_changed):
             signal.connect(lambda _w: self._visible and self._timer.start())
         ctx.windows.inventory_ready.connect(lambda: self._visible and self._timer.start())
+        ctx.tiler.state_changed.connect(lambda _s: self._visible and self._timer.start())
+        ctx.tiler.reflowed.connect(lambda _s: self._visible and self._timer.start())
+
+    def _tiling_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(16, 10, 16, 10)
+        row.setSpacing(12)
+        self.tile_all = QCheckBox("Tile all windows")
+        self.tile_all.setToolTip(
+            "Arrange every application window automatically, one layout per monitor, as windows open, close, "
+            "minimize and restore. Fixed-size and full-screen windows, and programs you leave floating, are not "
+            "touched. Drag a window onto another one to swap them, or onto another monitor to move it there.")
+        self.tile_all.toggled.connect(self._tile_all_toggled)
+        row.addWidget(self.tile_all)
+        self.tiling_kind = QComboBox()
+        for text, _kind, _columns in TILING_CHOICES:
+            self.tiling_kind.addItem(text)
+        self.tiling_kind.currentIndexChanged.connect(self._tiling_edited)
+        self.tiling_gap = QSpinBox()
+        self.tiling_gap.setRange(0, 64)
+        self.tiling_gap.setSuffix(" px gap")
+        self.tiling_gap.valueChanged.connect(self._tiling_edited)
+        self.tiling_ratio = QSpinBox()
+        self.tiling_ratio.setRange(20, 80)
+        self.tiling_ratio.setSuffix(" % main")
+        self.tiling_ratio.valueChanged.connect(self._tiling_edited)
+        for widget in (self.tiling_kind, self.tiling_gap, self.tiling_ratio):
+            row.addWidget(widget)
+        self.tiling_state = label("", "TilingState")
+        self.tiling_state.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.tiling_state, 1)
+        return panel
+
+    def _sync_tiling(self) -> None:
+        tiler = self.ctx.tiler
+        spec = tiler.global_layout()
+        self._syncing = True
+        try:
+            self.tile_all.setChecked(tiler.global_on)
+            index = next((i for i, (_t, kind, columns) in enumerate(TILING_CHOICES)
+                          if kind == spec.kind and (kind != GRID or columns == (2 if spec.columns == 2 else 0))), 1)
+            self.tiling_kind.setCurrentIndex(index)
+            self.tiling_gap.setValue(spec.gap)
+            self.tiling_ratio.setValue(round(spec.ratio * 100))
+        finally:
+            self._syncing = False
+        self.tiling_ratio.setVisible(spec.kind == MAIN_SIDE)
+        if not tiler.global_on:
+            state, kind = "Off: windows stay where you put them", "idle"
+        elif tiler.paused():
+            state, kind = "Paused while you move a window", "warn"
+        else:
+            tiled = tiler.tiled_windows()
+            monitors = len({tiler._home.get(w.key) for w in tiled})
+            state = (f"On: {len(tiled)} window{'s' if len(tiled) != 1 else ''} tiled"
+                     + (f" on {monitors} monitors" if monitors > 1 else ""))
+            kind = "good"
+        self.tiling_state.setText(state)
+        self.tiling_state.setProperty("kind", kind)
+        self.tiling_state.style().unpolish(self.tiling_state)
+        self.tiling_state.style().polish(self.tiling_state)
+
+    def _tile_all_toggled(self, on: bool) -> None:
+        if self._syncing:
+            return
+        self.ctx.tiler.set_global(on)
+        self.ctx.actions.message.emit("Tiling all windows: they follow the layout by themselves" if on else
+                                      "Tiling all windows is off: every window stays where it is")
+        self.refresh()
+
+    def _tiling_edited(self, _value: object = None) -> None:
+        if self._syncing:
+            return
+        _text, kind, columns = TILING_CHOICES[max(0, self.tiling_kind.currentIndex())]
+        self.ctx.tiler.set_global_layout(LayoutSpec(kind, gap=self.tiling_gap.value(),
+                                                    ratio=self.tiling_ratio.value() / 100, columns=columns))
+        self.tiling_ratio.setVisible(kind == MAIN_SIDE)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -121,6 +219,7 @@ class WindowsView(QWidget):
 
     def refresh(self) -> None:
         ctx = self.ctx
+        self._sync_tiling()
         windows = ctx.windows.windows()
         needle = self.filter.text().strip().lower()
         shown = [w for w in windows if not needle or needle in f"{w.title} {w.exe_name}".lower()]

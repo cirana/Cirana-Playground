@@ -82,7 +82,8 @@ class FakeDesktop:
         if win is None or not win.manageable:
             return None
         return TrackedWindow(win.hwnd, win.pid, win.created, win.exe, win.aumid, win.title, win.class_name, 0,
-                             self.frame_rect(hwnd), win.minimized, win.maximized, win.content_exe, win.content_aumid)
+                             self.frame_rect(hwnd), win.minimized, win.maximized, win.content_exe, win.content_aumid,
+                             not win.fixed_size)
 
     def hosts_of(self, pids: set[int]) -> set[int]:
         return {win.hwnd for win in self.windows.values() if win.shows_pids & pids and win.pid not in pids}

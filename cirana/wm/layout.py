@@ -57,11 +57,18 @@ class LayoutSpec:
     weights: list[float] = field(default_factory=list)  # side by side: relative column widths (empty = equal)
     monitor: MonitorRef | None = None  # tiled layouts: the monitor they fill (None = primary)
     free: dict[str, FreeSlot] = field(default_factory=dict)  # free layout: entry id -> slot
+    # Dynamic tiling: while the workspace is active, re-tile whenever its windows open, close, minimize or restore
+    # (tiled layouts only; see cirana.core.dynamic_tiling). Off by default and for records written before it existed.
+    dynamic: bool = False
+
+    @property
+    def tiled(self) -> bool:
+        return self.kind != FREE
 
     def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "gap": self.gap, "ratio": self.ratio, "columns": self.columns,
                 "weights": list(self.weights), "monitor": self.monitor.to_dict() if self.monitor else None,
-                "free": {key: slot.to_dict() for key, slot in self.free.items()}}
+                "free": {key: slot.to_dict() for key, slot in self.free.items()}, "dynamic": self.dynamic}
 
     @classmethod
     def from_dict(cls, raw: Any) -> "LayoutSpec":
@@ -87,7 +94,7 @@ class LayoutSpec:
             columns=int(number("columns", 0, 0, 8)),
             weights=[float(v) for v in weights if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0]
             if isinstance(weights, list) else [],
-            monitor=MonitorRef.from_dict(raw.get("monitor")), free=free,
+            monitor=MonitorRef.from_dict(raw.get("monitor")), free=free, dynamic=raw.get("dynamic") is True,
         )
 
 
