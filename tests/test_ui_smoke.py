@@ -40,6 +40,28 @@ class UiSmokeTests(unittest.TestCase):
         self.window._refresh_timer.stop()
         self.window._refresh_current()
 
+    def test_explorer_restart_message_re_hides_hosted_buttons_later(self):
+        import ctypes
+        import time
+        from ctypes import wintypes
+        from unittest import mock
+
+        from cirana.ui import main_window
+
+        msg = wintypes.MSG()
+        msg.message = main_window._TASKBAR_CREATED
+        other = wintypes.MSG()
+        other.message = 0x0200  # WM_MOUSEMOVE: ignored
+        with mock.patch.object(main_window.taskbar, "taskbar_restarted", return_value=0) as restarted:
+            self.assertEqual(self.window.nativeEvent(b"windows_generic_MSG", ctypes.addressof(other)), (False, 0))
+            self.assertEqual(self.window.nativeEvent(b"windows_generic_MSG", ctypes.addressof(msg)), (False, 0))
+            restarted.assert_not_called()  # never inside the native event handler
+            end = time.monotonic() + 2.0
+            while time.monotonic() < end and not restarted.called:
+                self.app.processEvents()
+                time.sleep(0.01)
+        restarted.assert_called_once()
+
     def test_app_icon_is_used_for_windows_and_the_sidebar(self):
         from PySide6.QtGui import QImage
 

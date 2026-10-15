@@ -240,6 +240,46 @@ def process_is_elevated(pid: int) -> bool | None:
         CloseHandle(handle)
 
 
+IO_REPARSE_TAG_APPEXECLINK = 0x8000001B
+_FSCTL_GET_REPARSE_POINT = 0x000900A8
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_OPEN_EXISTING = 3
+_INVALID_HANDLE = wintypes.HANDLE(-1).value
+CreateFileW = _bind(kernel32, "CreateFileW", wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                    ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+DeviceIoControl = _bind(kernel32, "DeviceIoControl", wintypes.BOOL, wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
+                        wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+
+
+def parse_app_alias(raw: bytes) -> list[str]:
+    """The strings of an app execution alias reparse buffer: [package family, AppUserModelID, target exe, ...].
+    Anything else (another reparse tag, a truncated buffer) gives []."""
+    if len(raw) < 12 or int.from_bytes(raw[:4], "little") != IO_REPARSE_TAG_APPEXECLINK:
+        return []
+    try:
+        return raw[12:].decode("utf-16-le").split("\0")[:3]
+    except UnicodeDecodeError:
+        return []
+
+
+def read_app_alias(path: str) -> list[str]:
+    """Read an app execution alias (e.g. ``%LOCALAPPDATA%/Microsoft/WindowsApps/wt.exe``): the file is a reparse point
+    that names the packaged app it starts. Opening it with FILE_FLAG_OPEN_REPARSE_POINT reads the link itself."""
+    handle = CreateFileW(path, 0, 7, None, _OPEN_EXISTING, _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+                         None)
+    if not handle or handle == _INVALID_HANDLE:
+        return []
+    try:
+        buffer = ctypes.create_string_buffer(16384)
+        size = wintypes.DWORD(0)
+        if not DeviceIoControl(handle, _FSCTL_GET_REPARSE_POINT, None, 0, buffer, len(buffer), ctypes.byref(size), None):
+            return []
+        return parse_app_alias(buffer.raw[:size.value])
+    finally:
+        CloseHandle(handle)
+
+
 def visible_frame_rect(hwnd: int) -> tuple[int, int, int, int]:
     """The window's visible bounds (without the invisible DWM resize borders); its window rect if DWM won't say."""
     rect = wintypes.RECT()

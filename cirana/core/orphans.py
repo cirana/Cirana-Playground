@@ -62,9 +62,10 @@ def restore_taskbar_buttons(entries: list[dict]) -> int:
     """Give docked windows their taskbar button back after CIRANA ended without undocking them (crash, kill).
 
     Only for a window that still belongs to the same process (pid and start time) and is an ordinary main window,
-    and never while the CIRANA instance that docked it is still running. Returns how many buttons came back.
+    and never while the CIRANA instance that docked it is still running. A button the shell refuses to give back now
+    (Explorer not ready yet) stays recorded and is retried. Returns how many buttons came back.
     """
-    restored = 0
+    eligible = []
     for entry in entries:
         try:
             hwnd, pid, created = int(entry["hwnd"]), int(entry["pid"]), float(entry.get("created") or 0)
@@ -76,8 +77,9 @@ def restore_taskbar_buttons(entries: list[dict]) -> int:
         if _alive_with_identity(pid, created) is None or w.window_pid(hwnd)[0] != pid \
                 or not is_main_window_candidate(hwnd):
             continue
-        restored += bool(taskbar.show_button(hwnd))
-    return restored
+        eligible.append({"hwnd": hwnd, "pid": pid, "created": created})
+    taskbar.adopt(eligible)
+    return taskbar.retry_pending()
 
 
 def end_orphan(orphan: Orphan) -> str:

@@ -218,12 +218,19 @@ def window(hwnd, title="App", exe=r"c:\tools\tool.exe", pid=10):
 
 class WindowWaitTests(unittest.TestCase):
     def run_wait(self, windows, **kw):
+        title_bars, hosts = kw.pop("title_bars", set()), kw.pop("hosts", {})
+        kw.setdefault("max_timeout", kw.get("timeout", 1.0))  # the started process is "running" in these fakes
         with mock.patch.object(playground, "list_top_level_windows", side_effect=lambda: list(windows)), \
                 mock.patch.object(playground.w, "IsWindow", return_value=True), \
                 mock.patch.object(playground.w, "IsHungAppWindow", return_value=False), \
+                mock.patch.object(playground.w, "GetForegroundWindow", return_value=kw.pop("foreground", 0)), \
+                mock.patch.object(playground, "_has_title_bar", side_effect=lambda h: h in title_bars), \
+                mock.patch.object(playground, "_hosts_of", side_effect=lambda tree: dict(hosts)), \
+                mock.patch.object(playground, "_grow_process_tree", side_effect=kw.pop("grow", lambda tree: True)), \
                 mock.patch.object(playground, "describe_window", side_effect=lambda h: next(i for i in windows if i.hwnd == h)):
             return wait_for_app_window(kw.pop("before", set()), kw.pop("exe", r"c:\tools\tool.exe"), kw.pop("pid", 0),
-                                       threading.Event(), timeout=kw.pop("timeout", 1.0), settle=0.15, poll=0.02)
+                                       threading.Event(), timeout=kw.pop("timeout", 1.0), settle=0.15, poll=0.02,
+                                       **kw)
 
     def test_new_titled_window_of_the_app_is_found_after_settling(self):
         started = time.monotonic()
@@ -233,16 +240,106 @@ class WindowWaitTests(unittest.TestCase):
 
     def test_existing_untitled_and_foreign_windows_are_ignored(self):
         windows = [window(1), window(2, title=" "), window(3, exe=r"c:\other\x.exe")]
-        self.assertIsNone(self.run_wait(windows, before={1}, timeout=0.4))
+        result = self.run_wait(windows, before={1}, timeout=0.4)
+        self.assertFalse(result)  # nothing found: a reason instead of a window
+        self.assertIsInstance(result, playground.NoWindow)
+        self.assertIn("No new window of tool.exe", result.reason)
 
     def test_launcher_stub_is_matched_by_file_name(self):
         packaged = window(5, exe=r"c:\program files\windowsapps\pkg\tool.exe")
         self.assertEqual(self.run_wait([packaged]).hwnd, 5)
 
+    # -- consoles in a terminal: the terminal window owns the (hidden) console window of each shell it shows --------
+    TERMINAL = r"c:\program files\windowsapps\microsoft.windowsterminal_1.24.0_x64__8wekyb3d8bbwe\windowsterminal.exe"
+    SHELL = r"c:\windows\system32\cmd.exe"
+
+    def test_terminal_window_showing_the_started_shell_is_found(self):
+        terminal = window(7, title=r"C:\WINDOWS\System32\cmd.exe", exe=self.TERMINAL, pid=900)
+        found = self.run_wait([terminal, window(8, exe=r"c:\other\x.exe", pid=901)], exe=self.SHELL, pid=50,
+                              hosts={7: {50}})
+        self.assertEqual(found.hwnd, 7)
+
+    def test_tab_in_an_existing_terminal_window_is_refused_at_once(self):
+        terminal = window(7, title="Windows PowerShell", exe=self.TERMINAL, pid=900)
+        started = time.monotonic()
+        result = self.run_wait([terminal], exe=self.SHELL, pid=50, before={7}, hosts={7: {50}}, timeout=5.0)
+        self.assertIsInstance(result, playground.NoWindow)
+        self.assertIn("tab", result.reason)
+        self.assertLess(time.monotonic() - started, 2.0)  # not after the full timeout
+        shared = self.run_wait([terminal], exe=self.SHELL, pid=50, hosts={7: {50, 77}})  # new, but shows others too
+        self.assertIsInstance(shared, playground.NoWindow)
+
+    def test_window_of_a_child_process_is_found(self):
+        def grow(tree):
+            tree.add(61)  # the launcher started the real program and may already be gone
+            return True
+
+        child = window(9, exe=r"c:\tools\real\app.exe", pid=61)
+        self.assertEqual(self.run_wait([child], exe=r"c:\tools\launcher.exe", pid=50, grow=grow).hwnd, 9)
+
+    def test_untitled_window_needs_a_strong_link_and_a_title_bar(self):
+        untitled = window(10, title="", pid=50)
+        self.assertEqual(self.run_wait([untitled], pid=50, title_bars={10}).hwnd, 10)
+        self.assertFalse(self.run_wait([untitled], pid=50, timeout=0.4))  # an untitled splash screen
+        stranger = window(11, title="", exe=r"c:\other\tool.exe", pid=99)  # same file name only: too weak
+        self.assertFalse(self.run_wait([stranger], title_bars={11}, timeout=0.4))
+
+    def test_alias_package_finds_new_windows_but_never_the_users_existing_one(self):
+        package = ("microsoft.windowsterminal", "8wekyb3d8bbwe")
+        alias = r"c:\users\u\appdata\local\microsoft\windowsapps\wt.exe"
+        users = window(12, title="Windows PowerShell", exe=self.TERMINAL, pid=900)
+        result = self.run_wait([users], exe=alias, pid=50, before={12}, package=package, timeout=0.4)
+        self.assertFalse(result)
+        fresh = window(13, title="Windows PowerShell", exe=self.TERMINAL, pid=900)
+        self.assertEqual(self.run_wait([users, fresh], exe=alias, pid=50, before={12}, package=package).hwnd, 13)
+
+    def test_running_copy_window_is_used_only_when_it_comes_to_the_front(self):
+        running = window(14)  # existed before the launch; the started copy handed over and exited
+        with mock.patch.object(playground, "EXITED_GRACE", 0.3):
+            found = self.run_wait([running], pid=50, before={14}, grow=lambda tree: False, foreground=14)
+            self.assertEqual(found.hwnd, 14)
+            result = self.run_wait([running], pid=50, before={14}, grow=lambda tree: False, foreground=0)
+        self.assertIsInstance(result, playground.NoWindow)
+        self.assertIn("exited without opening a window", result.reason)
+
+    def test_slow_application_gets_more_time_while_it_runs_and_says_so(self):
+        result = self.run_wait([], pid=50, timeout=0.2, max_timeout=0.5)
+        self.assertIsInstance(result, playground.NoWindow)
+        self.assertIn("still running", result.reason)
+
     def test_cancel_stops_the_wait(self):
         cancel = threading.Event()
         cancel.set()
         self.assertIsNone(wait_for_app_window(set(), "x.exe", 0, cancel, timeout=5))
+
+
+class AppAliasTests(unittest.TestCase):
+    """App execution aliases (``WindowsApps\\wt.exe``) name the package they start in their reparse data."""
+
+    @staticmethod
+    def buffer(*strings, tag=0x8000001B):
+        body = (3).to_bytes(4, "little") + "\0".join(strings).encode("utf-16-le") + b"\0\0"
+        return tag.to_bytes(4, "little") + len(body).to_bytes(2, "little") + b"\0\0" + body
+
+    def test_alias_buffer_is_parsed(self):
+        from cirana.native import win32_api
+
+        raw = self.buffer("Microsoft.WindowsTerminal_8wekyb3d8bbwe", "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+                          r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.24_x64__8wekyb3d8bbwe\wt.exe", "0")
+        self.assertEqual(win32_api.parse_app_alias(raw)[:2],
+                         ["Microsoft.WindowsTerminal_8wekyb3d8bbwe", "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"])
+        self.assertEqual(win32_api.parse_app_alias(self.buffer("x", tag=0xA000000C)), [])  # a symbolic link
+        self.assertEqual(win32_api.parse_app_alias(b"\x1b\x00\x00\x80"), [])  # truncated
+
+    def test_alias_package_only_for_aliases(self):
+        alias = r"c:\users\u\appdata\local\microsoft\windowsapps\wt.exe"
+        with mock.patch.object(playground.w, "read_app_alias",
+                               return_value=["Microsoft.WindowsTerminal_8wekyb3d8bbwe", "x!App", "y"]) as read:
+            self.assertEqual(playground.alias_package(alias), ("microsoft.windowsterminal", "8wekyb3d8bbwe"))
+            self.assertIsNone(playground.alias_package(r"c:\windows\system32\cmd.exe"))  # not even read
+        read.assert_called_once_with(alias)
+        with mock.patch.object(playground.w, "read_app_alias", return_value=[]):
+            self.assertIsNone(playground.alias_package(alias))  # unreadable: no package, plain matching
 
 
 class OrphanTests(unittest.TestCase):

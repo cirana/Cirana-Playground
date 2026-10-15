@@ -29,6 +29,7 @@ from cirana.core import application_launcher
 from cirana.core.application_registry import ApplicationRegistry
 from cirana.core.background import Job, run_async
 from cirana.core.models import AppEntry, LaunchResult, LaunchType
+from cirana.native import taskbar
 from cirana.native import win32_api as w
 from cirana.native import window_embedder as embedder
 from cirana.native.window_discovery import (
@@ -41,6 +42,9 @@ log = logging.getLogger(__name__)
 SETTLE_SECONDS = 0.5  # a window must survive this long before it is touched (apps often rebuild it while starting)
 WINDOW_TIMEOUT = 15.0
 EXISTING_WINDOW_AFTER = 4.0  # single-instance packaged apps (Settings...) show their existing window instead
+MAX_WINDOW_TIMEOUT = 45.0  # a slow application keeps getting time while the process CIRANA started is still running
+EXITED_GRACE = 5.0  # after the started process exited, a window may still come from a process it handed over to
+TREE_REFRESH = 0.5  # seconds between process-tree / window-owner scans
 UNKNOWN_WINDOW_REASON = "CIRANA cannot tell which window belongs to this application (its executable is unknown)."
 # Start-menu entries whose AppUserModelID names a classic program that CIRANA can host.
 _AUMID_PROGRAMS = {"microsoft.windows.remotedesktop": "mstsc.exe"}
@@ -121,11 +125,25 @@ def aumid_package(app: AppEntry) -> tuple[str, str] | None:
     """(package name, publisher id) of a packaged app's AUMID ``Name_PublisherId!AppId``, else None."""
     if app.launch_type != LaunchType.AUMID.value or "!" not in app.target:
         return None
-    family = app.target.split("!", 1)[0]
+    return _family_package(app.target.split("!", 1)[0])
+
+
+def _family_package(family: str) -> tuple[str, str] | None:
+    """(name, publisher id) of a package family name ``Name_PublisherId``."""
     if "_" not in family:
         return None
     name, publisher = family.rsplit("_", 1)
     return (name.lower(), publisher.lower()) if name and publisher else None
+
+
+def alias_package(exe: str) -> tuple[str, str] | None:
+    """The package behind an app execution alias (``...\\Microsoft\\WindowsApps\\wt.exe``). The alias only hands the
+    request over: the window then belongs to another image of the package (WindowsTerminal.exe), often in a process
+    that was already running, so neither the file name nor the process tree leads to it."""
+    if not exe or "\\microsoft\\windowsapps\\" not in exe.lower():
+        return None
+    fields = w.read_app_alias(exe)
+    return _family_package(fields[0]) if fields and fields[0] else None
 
 
 def in_package(exe: str, package: tuple[str, str] | None) -> bool:
@@ -189,33 +207,118 @@ def window_matches(info: WindowInfo, exe: str, pid: int = 0, package: tuple[str,
     return False
 
 
+@dataclass(frozen=True)
+class NoWindow:
+    """Why no window was picked. Falsy, so code that expects ``WindowInfo | None`` keeps working."""
+
+    reason: str
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def _grow_process_tree(tree: set[int]) -> bool:
+    """Add the current children of every process in ``tree``; True while any of them is still running.
+
+    Launchers and stubs often start the real program as a child (or a grandchild) and exit; the union of every pid
+    ever seen is kept, so a window opened by a child that outlived its parent still counts."""
+    alive = False
+    for pid in list(tree):
+        try:
+            proc = psutil.Process(pid)
+            tree.update(child.pid for child in proc.children(recursive=True))
+            alive = alive or proc.is_running()
+        except psutil.Error:
+            continue
+    return alive
+
+
+def _hosts_of(tree: set[int]) -> dict[int, set[int]]:
+    """Windows of *other* processes that own a window of the started process tree, mapped to every process whose
+    windows they own. A terminal owns the console window of each shell it shows (Windows Terminal hosts PowerShell
+    and CMD this way), so this links a shell to the terminal window showing it without knowing any terminal by name.
+    Only GetWindow / GetWindowThreadProcessId: no process is opened, no message is sent."""
+    owned_by: dict[int, set[int]] = {}
+    for hwnd in snapshot_handles():
+        owner = int(w.GetWindow(hwnd, w.GW_OWNER) or 0)
+        if owner:
+            owned_by.setdefault(owner, set()).add(w.window_pid(hwnd)[0])
+    return {owner: pids for owner, pids in owned_by.items() if pids & tree and w.window_pid(owner)[0] not in tree}
+
+
+def _has_title_bar(hwnd: int) -> bool:
+    return int(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE)) & w.WS_CAPTION == w.WS_CAPTION
+
+
 def wait_for_app_window(
     before: set[int], exe: str, pid: int, cancel: threading.Event,
     timeout: float = WINDOW_TIMEOUT, settle: float = SETTLE_SECONDS, poll: float = 0.1,
     package: tuple[str, str] | None = None, title: str = "", existing_after: float | None = None,
-    exclude: set[int] | None = None,
-) -> WindowInfo | None:
-    """Worker-thread loop: the first new, titled window of the application that stays stable for ``settle`` seconds.
+    exclude: set[int] | None = None, max_timeout: float = MAX_WINDOW_TIMEOUT,
+) -> WindowInfo | NoWindow | None:
+    """Worker-thread loop: the first new window of the application that stays stable for ``settle`` seconds.
+
+    A window belongs to the application when it is shown by the started process or one of its descendants, by a
+    window of another process that owns one of theirs (a terminal showing a console), by the application's package,
+    or by its executable (full path; the file name or the title only for titled windows). Untitled windows need a
+    strong link and a title bar (an untitled splash screen is not the application's window).
 
     ``existing_after``: from then on a window that already existed before the launch is accepted too (single-instance
-    apps bring their existing window forward instead of opening a new one). ``exclude``: windows already in tabs.
+    packaged apps bring their existing window forward). A classic program's existing window is only accepted when the
+    started process exited and that window came to the front. ``exclude``: windows already in tabs. Returns
+    :class:`NoWindow` with the reason when it gives up, None when cancelled.
     """
     started = time.monotonic()
-    deadline = started + timeout
     seen: dict[int, float] = {}
     exclude = exclude or set()
-    while not cancel.is_set() and time.monotonic() < deadline:
+    tree = {pid} if pid else set()
+    alive, exited_at, hosts, next_tree = bool(pid), None, {}, 0.0
+    name = os.path.basename(exe) if exe else (title or "The application")
+    grace = timeout if package else EXITED_GRACE  # an alias / packaged app hands over to another process
+    while not cancel.is_set():
         now = time.monotonic()
+        if tree and now >= next_tree:
+            alive = _grow_process_tree(tree)
+            hosts = _hosts_of(tree)
+            next_tree = now + TREE_REFRESH
+            if not alive and exited_at is None:
+                exited_at = now
+        limit = max_timeout if alive else timeout
+        if now - started >= limit:
+            if alive:
+                return NoWindow(f"{name} is still running but showed no window within {int(limit)} seconds. "
+                                "CIRANA did not touch it.")
+            return NoWindow(f"No new window of {name} appeared within {int(limit)} seconds. The application probably "
+                            "reused an existing window or is still starting; CIRANA did not touch it.")
         allow_existing = existing_after is not None and now - started >= existing_after
+        foreground = int(w.GetForegroundWindow() or 0)
         for info in list_top_level_windows():
-            if info.hwnd in exclude or (info.hwnd in before and not allow_existing) or not info.title.strip():
+            if info.hwnd in exclude:
                 continue
-            if not window_matches(info, exe, pid, package, title):
+            shown_by_host = info.hwnd in hosts
+            if shown_by_host and (info.hwnd in before or hosts[info.hwnd] - tree - {info.pid}):
+                return NoWindow(f"{name} opened as a tab in a terminal window that also shows other programs. Tabs "
+                                "are not separate windows, so CIRANA left it alone. To host it, let the terminal open "
+                                "new windows instead of tabs.")
+            if info.hwnd in before and not allow_existing:
+                # a single-instance program: its launcher exited and the running copy brought its window forward
+                if not (exited_at is not None and exe and info.exe == exe and info.hwnd == foreground):
+                    continue
+            strong = shown_by_host or info.pid in tree or bool(exe and info.exe == exe) \
+                or bool(package and window_matches(info, "", 0, package))
+            if not strong and not window_matches(info, exe, 0, None, title):
+                continue
+            untitled = not info.title.strip()
+            if untitled and not (strong and _has_title_bar(info.hwnd)):
                 continue
             first = seen.setdefault(info.hwnd, now)
-            if (now - first >= settle or info.hwnd in before) and w.IsWindow(info.hwnd) \
+            if (now - first >= settle * (2 if untitled else 1) or info.hwnd in before) and w.IsWindow(info.hwnd) \
                     and not w.IsHungAppWindow(info.hwnd):
                 return describe_window(info.hwnd)
+        if exited_at is not None and now - exited_at >= grace:
+            return NoWindow(f"{name} exited without opening a window of its own. It probably passed the request to a "
+                            "copy that was already running, which did not bring a window to the front, so CIRANA could "
+                            "not tell which window it is and left everything alone.")
         time.sleep(poll)
     return None
 
@@ -305,7 +408,7 @@ class PlaygroundManager(QObject):
             return self._open_external(app, reason)
 
         exe = app_exe(app)
-        package = aumid_package(app)
+        package = aumid_package(app) or alias_package(exe)
         if reuse_existing and exe:  # without an executable "the running window" cannot be identified
             hosted = self.hosted_handles()
             candidates = known_windows if known_windows is not None else windows_of_executable(exe)
@@ -325,7 +428,9 @@ class PlaygroundManager(QObject):
         session = self._new_session(app, workspace_id, launched_by_cirana=True)
         pid = result.pid or 0
         # Packaged apps start through the shell (no pid, no executable path): find them by package, then by name.
-        extra = {} if exe else {"package": package, "title": app.name, "existing_after": EXISTING_WINDOW_AFTER}
+        # An alias's package helps find a *new* window; its already open windows (the user's own Terminal) never count.
+        extra = {"package": package} if exe else {"package": package, "title": app.name,
+                                                  "existing_after": EXISTING_WINDOW_AFTER}
         exclude = self.hosted_handles()  # docked windows are top-level: never pick one that is already in a tab
         self._jobs[session.id] = run_async(
             lambda cancel: wait_for_app_window(before, exe, pid, cancel, exclude=exclude, **extra),
@@ -418,9 +523,10 @@ class PlaygroundManager(QObject):
         if session is None:
             return
         self._jobs.pop(session_id, None)
-        if info is None:
+        if not info:  # None or NoWindow (which says why)
             self._settle(
                 session_id, SessionState.EXTERNAL,
+                info.reason if isinstance(info, NoWindow) else
                 f"No new window of {session.title} appeared within {int(WINDOW_TIMEOUT)} seconds. The application "
                 "probably reused an existing window or is still starting; CIRANA did not touch it.",
             )
@@ -489,29 +595,27 @@ class PlaygroundManager(QObject):
                     "session": session.id, "app_id": session.app_id, "title": session.title, "exe": session.exe,
                     "pid": session.pid, "created": identity["created"], "hwnd": session.hwnd, "owner": self._owner,
                 })
-        # Docked windows have their taskbar button hidden while hosted: if CIRANA dies, the next start gives it back.
-        docked = []
-        for session in [] if only_unreleased else self._sessions.values():
-            if session.state is SessionState.EMBEDDED and session.docked and session.hwnd:
-                pid = w.window_pid(session.hwnd)[0]  # the window's own process (a UWP frame is not the app's pid)
-                if pid:
-                    docked.append({"hwnd": session.hwnd, "pid": pid, "owner": self._owner,
-                                   "created": self._process_identity(pid)["created"]})
         try:
-            self._settings.playground_store.save({"embedded": entries, "docked": docked})
+            self._settings.playground_store.save({"embedded": entries, "docked": self._taskbar_records()})
         except (OSError, ValueError):
             log.exception("Could not write the playground session file")
 
     def clear_persisted_state(self) -> None:
         """Forget the crash-recovery records, except held ones: those windows are still parented to a host, so they
         stay recoverable on the next start if CIRANA ends before they are released."""
+        taskbar.retry_pending()  # buttons whose AddTab failed earlier get another chance before the records are written
         if self._unreleased:
             self._persist(only_unreleased=True)
             return
         try:
-            self._settings.playground_store.save({"embedded": []})
+            self._settings.playground_store.save({"embedded": [], "docked": self._taskbar_records()})
         except (OSError, ValueError):
             log.exception("Could not clear the playground session file")
+
+    def _taskbar_records(self) -> list[dict]:
+        """Windows whose taskbar button is still missing because of CIRANA (hidden while docked, or not given back
+        yet because AddTab failed). If CIRANA dies, the next start gives them back."""
+        return [{**record, "owner": self._owner} for record in taskbar.records()]
 
     def shutdown(self) -> None:
         for job in self._jobs.values():

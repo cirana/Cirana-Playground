@@ -275,6 +275,9 @@ def show_docked(embedded: EmbeddedWindow, minimized: bool) -> None:
 
 def _undock(embedded: EmbeddedWindow, activate: bool) -> bool:
     if not _docked_ours(embedded):
+        if embedded.taskbar_hidden:  # closed, or the handle now names another window: nothing to give back
+            taskbar.forget(embedded.hwnd)
+            embedded.taskbar_hidden = False
         return False
     state, hwnd = embedded.state, embedded.hwnd
     left, top, right, bottom = state.rect
@@ -282,8 +285,8 @@ def _undock(embedded: EmbeddedWindow, activate: bool) -> bool:
                    w.SWP_NOZORDER | w.SWP_NOACTIVATE | w.SWP_NOOWNERZORDER | w.SWP_ASYNCWINDOWPOS)
     w.ShowWindowAsync(hwnd, w.SW_SHOWMAXIMIZED if state.maximized else w.SW_SHOWNOACTIVATE)
     if embedded.taskbar_hidden:  # a normal window again: its own taskbar button comes back
-        taskbar.show_button(hwnd)
-        embedded.taskbar_hidden = False
+        # On failure the taskbar module keeps the record: retried later and kept for crash recovery.
+        embedded.taskbar_hidden = not taskbar.show_button(hwnd)
     if activate and not w.IsHungAppWindow(hwnd):
         w.SetForegroundWindow(hwnd)
     return True

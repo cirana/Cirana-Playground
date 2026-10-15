@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+from ctypes import wintypes
 
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
@@ -10,6 +11,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from cirana.core.orphans import end_orphan, find_orphans, restore_taskbar_buttons
+from cirana.native import taskbar
 from cirana.ui.dialogs import OrphanDialog
 
 from cirana.ui.applications_view import ApplicationsView
@@ -25,6 +27,7 @@ from cirana.ui.workspace_view import WorkspaceView
 from cirana.widgets.workspace_drop_bar import WorkspaceDropBar
 
 log = logging.getLogger(__name__)
+_TASKBAR_CREATED = ctypes.windll.user32.RegisterWindowMessageW("TaskbarCreated")  # broadcast when Explorer restarts
 
 PAGE_KEYS = [key for key, _t, _g in NAV_ITEMS]
 
@@ -269,6 +272,19 @@ class MainWindow(QWidget):
         if not self._styled:
             self._styled = True
             style_native_frame(int(self.winId()))
+
+    def nativeEvent(self, event_type, message):  # noqa: ANN001 - Qt signature
+        """Explorer restarted: its "TaskbarCreated" broadcast reaches every top-level window. The new taskbar shows a
+        button for every window again, including hosted ones; the shell object is re-created a moment later (no COM
+        work inside a native event handler)."""
+        if _TASKBAR_CREATED and bytes(event_type) == b"windows_generic_MSG" \
+                and wintypes.MSG.from_address(int(message)).message == _TASKBAR_CREATED:
+            QTimer.singleShot(1000, self._taskbar_restarted)
+        return False, 0
+
+    def _taskbar_restarted(self) -> None:
+        hidden = taskbar.taskbar_restarted()
+        log.info("The taskbar restarted; hid the buttons of %d hosted window(s) again", hidden)
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
