@@ -72,7 +72,9 @@ def _packaged_image(exe: str) -> bool:
 
 def hosting_mode(info: WindowInfo) -> str:
     """How a window would be hosted: re-parented (child) or docked over the tab. Inspects, never changes."""
-    docked = info.class_name in DOCKED_CLASSES or _packaged_image(info.exe) or info.exe_name in DOCKED_EXECUTABLES
+    # An owned window is docked too: re-parenting would drop its owner, and the restore could not give it back.
+    docked = (info.class_name in DOCKED_CLASSES or _packaged_image(info.exe) or info.exe_name in DOCKED_EXECUTABLES
+              or bool(info.owner))
     return DOCKED if docked else CHILD
 
 

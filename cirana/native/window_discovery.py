@@ -16,6 +16,7 @@ class WindowInfo:
     title: str
     class_name: str
     exe: str  # lower-case image path of the owning process ("" if inaccessible)
+    owner: int = 0  # GW_OWNER: the window this one belongs to (0 = un-owned)
 
     @property
     def exe_name(self) -> str:
@@ -24,7 +25,8 @@ class WindowInfo:
 
 def _describe(hwnd: int) -> WindowInfo:
     pid, tid = w.window_pid(hwnd)
-    return WindowInfo(hwnd, pid, tid, w.window_text(hwnd), w.class_name(hwnd), w.process_image_path(pid).lower())
+    return WindowInfo(hwnd, pid, tid, w.window_text(hwnd), w.class_name(hwnd), w.process_image_path(pid).lower(),
+                      int(w.GetWindow(hwnd, w.GW_OWNER) or 0))
 
 
 def describe_window(hwnd: int) -> WindowInfo:
@@ -44,7 +46,33 @@ def is_main_window_candidate(hwnd: int) -> bool:
     return (right - left) > 80 and (bottom - top) > 60
 
 
-def list_top_level_windows(only_candidates: bool = True) -> list[WindowInfo]:
+def is_interactive_owned_window(hwnd: int) -> bool:
+    """An owned top-level window a user really works with (not a menu, tooltip, drop-down or splash).
+
+    Some programs make their main window owned by a hidden helper window (Delphi / VCL, some .NET apps), and tool
+    palettes or dialogs are owned by the main window. Accepted only when it is visible, not cloaked, enabled (not
+    blocked by a modal dialog), activatable, not a tool window, has a real title bar (or asks for a taskbar button)
+    and a real size. GetWindow / GetWindowLongPtr / GetWindowRect send nothing to the window.
+    """
+    if not w.IsWindow(hwnd) or not w.GetWindow(hwnd, w.GW_OWNER):
+        return False
+    if not w.IsWindowVisible(hwnd) or w.is_cloaked(hwnd):
+        return False
+    style = int(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE)) & 0xFFFFFFFF
+    ex_style = int(w.GetWindowLongPtrW(hwnd, w.GWL_EXSTYLE)) & 0xFFFFFFFF
+    if style & (w.WS_CHILD | w.WS_DISABLED) or ex_style & w.WS_EX_NOACTIVATE:
+        return False
+    if ex_style & w.WS_EX_TOOLWINDOW and not ex_style & w.WS_EX_APPWINDOW:
+        return False
+    if style & w.WS_CAPTION != w.WS_CAPTION and not ex_style & w.WS_EX_APPWINDOW:
+        return False  # menus, tooltips, address-bar suggestions, splash screens: popups without a title bar
+    left, top, right, bottom = w.window_rect(hwnd)
+    return (right - left) > 80 and (bottom - top) > 60
+
+
+def list_top_level_windows(only_candidates: bool = True, include_owned: bool = False) -> list[WindowInfo]:
+    """``include_owned``: also interactive owned windows (the Running window picker). Launch detection and crash
+    recovery keep using main window candidates only."""
     found: list[int] = []
 
     @w.WNDENUMPROC
@@ -53,7 +81,8 @@ def list_top_level_windows(only_candidates: bool = True) -> list[WindowInfo]:
         return True
 
     w.EnumWindows(collect, 0)
-    return [_describe(h) for h in found if not only_candidates or is_main_window_candidate(h)]
+    return [_describe(h) for h in found if not only_candidates or is_main_window_candidate(h)
+            or (include_owned and is_interactive_owned_window(h))]
 
 
 def snapshot_handles() -> set[int]:
@@ -115,5 +144,5 @@ def child_windows(hwnd: int) -> list[int]:
 
 __all__ = [
     "WindowInfo", "describe_window", "is_main_window_candidate", "list_top_level_windows", "snapshot_handles", "wait_for_new_window",
-    "windows_of_process", "windows_of_executable", "own_pid", "child_windows",
+    "is_interactive_owned_window", "windows_of_process", "windows_of_executable", "own_pid", "child_windows",
 ]

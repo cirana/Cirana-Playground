@@ -102,8 +102,15 @@ class WindowPickerDialog(QDialog):
         layout.addWidget(label(
             "Pick a window that is already open. It moves into a Playground tab and can be detached again at any "
             "time. Applications that cannot be hosted safely are greyed out.", "Muted", wrap=True))
+        top = QHBoxLayout()
         self.status = label("Looking for windows…", "Muted")
-        layout.addWidget(self.status)
+        top.addWidget(self.status, 1)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setObjectName("SecondaryButton")
+        self.refresh_button.setToolTip("Look for open windows again")
+        self.refresh_button.clicked.connect(self.refresh)
+        top.addWidget(self.refresh_button)
+        layout.addLayout(top)
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(lambda _item: self._accept_current())
         layout.addWidget(self.list, 1)
@@ -111,25 +118,56 @@ class WindowPickerDialog(QDialog):
         box.accepted.disconnect()
         box.accepted.connect(self._accept_current)
         layout.addWidget(box)
-        job = run_async(self._collect, self._show, lambda err: self.status.setText(f"Could not list windows: {err}"))
-        self.finished.connect(lambda _result: job.cancel())  # a closed dialog must not receive late results
+        self._job = None
+        self.finished.connect(lambda _result: self._job and self._job.cancel())  # no late results after closing
+        self.refresh()
+
+    @property
+    def scanning(self) -> bool:
+        return self._job is not None
+
+    def refresh(self) -> None:
+        """List the open windows again, on a worker thread. Ignored while a scan is still running."""
+        if self._job is not None:
+            return
+        self.refresh_button.setEnabled(False)
+        self.status.setText("Looking for windows…")
+        self._job = run_async(self._collect, self._scan_done, self._scan_failed)
+
+    def _scan_done(self, rows: list[tuple[WindowInfo, str, bool]]) -> None:
+        self._job = None
+        self.refresh_button.setEnabled(True)
+        self._show(rows)
+
+    def _scan_failed(self, error: str) -> None:
+        self._job = None
+        self.refresh_button.setEnabled(True)
+        self.status.setText(f"Could not list windows: {error}")
+
+    @staticmethod
+    def display_title(info: WindowInfo) -> str:
+        """A window without a title is shown by its program's name."""
+        return info.title.strip() or info.exe_name or f"Window of process {info.pid}"
 
     def _collect(self, _cancel) -> list[tuple[WindowInfo, str, bool]]:
         rows = []
-        for info in list_top_level_windows():
-            if info.pid == own_pid() or info.hwnd in self._hosted or not info.title.strip():
+        for info in list_top_level_windows(include_owned=True):
+            if info.pid == own_pid() or info.hwnd in self._hosted:
                 continue
             docked = hosting_mode(info) == DOCKED  # Store / UWP apps, consoles, Explorer: docked, never re-parented
             compat = dock_compatibility(info) if docked else check_compatibility(info)
             rows.append((info, "" if compat.status is EmbedStatus.OK else compat.reason, docked))
-        rows.sort(key=lambda r: (bool(r[1]), r[0].title.lower()))
+        rows.sort(key=lambda r: (bool(r[1]), self.display_title(r[0]).lower()))
         return rows
 
     def _show(self, rows: list[tuple[WindowInfo, str, bool]]) -> None:
+        current = self.list.currentItem()
+        keep = current.data(Qt.ItemDataRole.UserRole).hwnd if current is not None else 0
         self.list.clear()
         for info, reason, docked in rows:
             suffix = " (docked over the tab)" if docked and not reason else ""
-            item = QListWidgetItem(f"{info.title}\n{info.exe_name}{suffix}")
+            detail = info.exe_name if info.title.strip() else "untitled window"
+            item = QListWidgetItem(f"{self.display_title(info)}\n{detail}{suffix}")
             item.setData(Qt.ItemDataRole.UserRole, info)
             if reason:
                 item.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -137,10 +175,10 @@ class WindowPickerDialog(QDialog):
             self.list.addItem(item)
         usable = sum(1 for _i, reason, _docked in rows if not reason)
         self.status.setText(f"{usable} of {len(rows)} windows can be hosted." if rows else "No windows found.")
-        for row in range(self.list.count()):
-            if self.list.item(row).flags() & Qt.ItemFlag.ItemIsEnabled:
-                self.list.setCurrentRow(row)
-                break
+        enabled = [row for row in range(self.list.count()) if self.list.item(row).flags() & Qt.ItemFlag.ItemIsEnabled]
+        again = [row for row in enabled if self.list.item(row).data(Qt.ItemDataRole.UserRole).hwnd == keep]
+        if enabled:
+            self.list.setCurrentRow((again or enabled)[0])  # a refresh keeps the window that was selected
 
     def _accept_current(self) -> None:
         item = self.list.currentItem()
