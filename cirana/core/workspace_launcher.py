@@ -17,7 +17,9 @@ from cirana.core import application_launcher
 from cirana.core.application_registry import ApplicationRegistry
 from cirana.core.background import run_async
 from cirana.core.models import AppEntry, LaunchResult
-from cirana.core.playground import PlaygroundManager, SessionState, app_exe, embed_precheck, wait_for_app_window
+from cirana.core.playground import (
+    MAX_WINDOW_TIMEOUT, PlaygroundManager, SessionState, app_exe, embed_precheck, wait_for_app_window,
+)
 from cirana.core.workspaces import MODE_EMBEDDED, SavedLayout, Workspace, WorkspaceManager
 from cirana.native import window_embedder as embedder
 from cirana.native.window_discovery import WindowInfo, list_top_level_windows, snapshot_handles
@@ -25,7 +27,10 @@ from cirana.native.window_restorer import capture_state, place_window
 
 log = logging.getLogger(__name__)
 
-SETTLE_WAIT = 22.0  # never wait longer than this for one application before moving on
+# The Playground's window search ends by itself (found, or a reason) within MAX_WINDOW_TIMEOUT; the workspace waits a
+# little longer, so it never moves on while a search is still running. Should it ever have to, the search is
+# cancelled first (see _wait_timed_out).
+SETTLE_WAIT = MAX_WINDOW_TIMEOUT + 5.0
 STEP_DELAY_MS = 150
 
 
@@ -189,7 +194,9 @@ class WorkspaceLauncher(QObject):
             return
 
         def job(cancel: threading.Event) -> bool:
-            info = wait_for_app_window(before, exe, pid, cancel, timeout=12.0, settle=0.3)
+            # 12 s in all, even while the program runs: a placement that comes much later would move a window the
+            # user may already have arranged.
+            info = wait_for_app_window(before, exe, pid, cancel, timeout=12.0, settle=0.3, max_timeout=12.0)
             return bool(info and place_window(info.hwnd, tuple(placement["rect"]), bool(placement.get("maximized"))))
 
         run_async(job)  # fire and forget: a window that never appears simply stays where Windows put it
@@ -211,8 +218,14 @@ class WorkspaceLauncher(QObject):
 
     def _wait_timed_out(self) -> None:
         if self._waiting:
-            self._summary.failed.append((self._wait_names.pop(self._waiting, "an application"), "no window appeared in time"))
-            self._waiting = ""
+            session_id, self._waiting = self._waiting, ""  # cleared first: the settle below is not waited for
+            name = self._wait_names.pop(session_id, "an application")
+            # Cancel the search before moving on: a window found later must not be attached to this session while
+            # the next application (possibly the same program) is already starting.
+            self._playground.cancel_search(session_id, f"CIRANA stopped looking for the window of {name} after "
+                                                       f"{int(SETTLE_WAIT)} seconds; it keeps running as a normal "
+                                                       "window.")
+            self._summary.failed.append((name, "no window appeared in time"))
             self._next()
 
     def _finish(self) -> None:

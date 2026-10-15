@@ -510,6 +510,17 @@ class PlaygroundManager(QObject):
             self._persist()
             self.session_removed.emit(session_id)
 
+    def cancel_search(self, session_id: str, message: str) -> bool:
+        """Stop looking for a session's window (the caller gave up waiting). The search is cancelled first, so a late
+        result can never attach a window to this session (or to anything else); the session settles as a normal
+        window. False when no search was running."""
+        job = self._jobs.get(session_id)
+        if job is None:
+            return False
+        job.cancel()
+        self._settle(session_id, SessionState.EXTERNAL, message)
+        return True
+
     def _settle(self, session_id: str, state: SessionState, message: str) -> None:
         if session_id not in self._sessions:
             return

@@ -347,6 +347,60 @@ class LauncherTests(UiBase):
         self.assertEqual(summary.failed, [("Beta", "boom")])
         self.ctx.registry.apply_scan([exe_app(n) for n in ("Alpha", "Beta", "Delta")] + [unhostable_app("Gamma")])
 
+    def test_workspace_waits_at_least_as_long_as_the_window_search(self):
+        self.assertGreater(workspace_launcher.SETTLE_WAIT, playground.MAX_WINDOW_TIMEOUT)
+        self.assertGreater(self.ctx.launcher._wait_timer.interval(), playground.MAX_WINDOW_TIMEOUT * 1000)
+
+    def slow_search(self, slow_name, release):
+        """A fake window search that keeps looking for ``slow_name`` until ``release`` is set (or it is cancelled),
+        and then still reports a window: like a real search whose result arrives late."""
+        def wait(before, exe, pid, cancel, **kw):
+            if os.path.basename(exe).startswith(slow_name.lower()):
+                while not release.is_set() and not cancel.is_set():
+                    time.sleep(0.01)
+            return self.fake_wait(before, exe, pid, cancel, **kw)
+        return wait
+
+    def test_next_application_waits_until_the_window_search_is_done(self):
+        import threading
+
+        workspace = self.make(["Alpha", "Beta"])
+        release = threading.Event()
+        summaries = []
+        self.ctx.launcher.finished.connect(summaries.append)
+        self.addCleanup(self.ctx.launcher.finished.disconnect, summaries.append)
+        with mock.patch.object(playground, "wait_for_app_window", side_effect=self.slow_search("Alpha", release)):
+            self.assertTrue(self.ctx.launcher.open(workspace.id))
+            self.pump(0.6)
+            self.assertEqual(self.launches, ["Alpha"])  # Alpha's search is still running: Beta is not started yet
+            release.set()
+            self.assertTrue(self.pump(until=lambda: bool(summaries)))
+        self.assertEqual(self.launches, ["Alpha", "Beta"])
+        self.assertEqual(summaries[0].in_tabs, ["Alpha", "Beta"])
+        self.assertEqual(summaries[0].failed, [])
+
+    def test_giving_up_cancels_the_search_so_a_late_window_is_never_attached(self):
+        import threading
+
+        workspace = self.make(["Alpha", "Beta"])
+        release = threading.Event()
+        self.addCleanup(release.set)
+        timer = self.ctx.launcher._wait_timer
+        self.addCleanup(timer.setInterval, timer.interval())
+        timer.setInterval(300)  # the safety net, shortened for the test
+        with mock.patch.object(playground, "wait_for_app_window", side_effect=self.slow_search("Alpha", release)), \
+                mock.patch.object(embedder, "embed", side_effect=self.fake_embed) as embed:
+            summary = self.open_workspace(workspace.id)
+            self.pump(0.3)  # time for a late result to arrive (it must be dropped)
+        self.assertEqual(summary.failed, [("Alpha", "no window appeared in time")])
+        self.assertEqual(summary.in_tabs, ["Beta"])
+        alpha = next(s for s in self.manager.sessions() if s.app_id == stable_app_id("Alpha"))
+        self.assertIs(alpha.state, SessionState.EXTERNAL)  # settled as a normal window, with the reason
+        self.assertIn("stopped looking", alpha.message)
+        self.assertEqual(alpha.hwnd, 0)  # the late window was never attached to it
+        self.assertEqual(embed.call_count, 1)  # only Beta's window was hosted
+        self.assertNotIn(alpha.id, self.manager._jobs)
+
     def test_only_one_workspace_opens_at_a_time(self):
         workspace = self.make(["Alpha", "Delta"])
         summaries = []
