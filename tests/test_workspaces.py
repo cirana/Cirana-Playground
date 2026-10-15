@@ -231,6 +231,9 @@ class UiBase(unittest.TestCase):
             mock.patch.object(embedder, "is_hung", return_value=False),
             mock.patch.object(embedder, "focus"),
             mock.patch.object(embedder, "set_active"),  # fake HWNDs: never post to a real window
+            # fake HWNDs: never hide or add a taskbar button of whatever real window has that handle
+            mock.patch.object(embedder.taskbar, "hide_button", return_value=True),
+            mock.patch.object(embedder.taskbar, "show_button", return_value=True),
             mock.patch.object(embedder, "has_focus", return_value=True),
             mock.patch.object(embedder, "contains_point", return_value=False),
             mock.patch.object(embedder, "bring_to_front", side_effect=lambda h: self.fronted.append(h) or True),

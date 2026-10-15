@@ -331,6 +331,9 @@ class PlaygroundUiTests(unittest.TestCase):
             mock.patch.object(embedder, "focus"),
             # the offscreen HWNDs are fake numbers: never post anything to whatever real window has that handle
             mock.patch.object(embedder, "set_active"),
+            # fake HWNDs: never hide or add a taskbar button of whatever real window has that handle
+            mock.patch.object(embedder.taskbar, "hide_button", return_value=True),
+            mock.patch.object(embedder.taskbar, "show_button", return_value=True),
             mock.patch.object(embedder, "has_focus", return_value=True),
             mock.patch.object(embedder, "contains_point", return_value=False),
             mock.patch.object(playground, "snapshot_handles", return_value=set()),

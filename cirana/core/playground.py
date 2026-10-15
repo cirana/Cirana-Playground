@@ -489,8 +489,16 @@ class PlaygroundManager(QObject):
                     "session": session.id, "app_id": session.app_id, "title": session.title, "exe": session.exe,
                     "pid": session.pid, "created": identity["created"], "hwnd": session.hwnd, "owner": self._owner,
                 })
+        # Docked windows have their taskbar button hidden while hosted: if CIRANA dies, the next start gives it back.
+        docked = []
+        for session in [] if only_unreleased else self._sessions.values():
+            if session.state is SessionState.EMBEDDED and session.docked and session.hwnd:
+                pid = w.window_pid(session.hwnd)[0]  # the window's own process (a UWP frame is not the app's pid)
+                if pid:
+                    docked.append({"hwnd": session.hwnd, "pid": pid, "owner": self._owner,
+                                   "created": self._process_identity(pid)["created"]})
         try:
-            self._settings.playground_store.save({"embedded": entries})
+            self._settings.playground_store.save({"embedded": entries, "docked": docked})
         except (OSError, ValueError):
             log.exception("Could not write the playground session file")
 

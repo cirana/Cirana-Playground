@@ -12,7 +12,9 @@ from dataclasses import dataclass
 
 import psutil
 
-from cirana.native.window_discovery import windows_of_process
+from cirana.native import taskbar
+from cirana.native import win32_api as w
+from cirana.native.window_discovery import is_main_window_candidate, windows_of_process
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +56,28 @@ def find_orphans(entries: list[dict]) -> list[Orphan]:
             continue
         found.append(Orphan(pid, str(entry.get("title") or proc.name()), str(entry.get("exe") or ""), created))
     return found
+
+
+def restore_taskbar_buttons(entries: list[dict]) -> int:
+    """Give docked windows their taskbar button back after CIRANA ended without undocking them (crash, kill).
+
+    Only for a window that still belongs to the same process (pid and start time) and is an ordinary main window,
+    and never while the CIRANA instance that docked it is still running. Returns how many buttons came back.
+    """
+    restored = 0
+    for entry in entries:
+        try:
+            hwnd, pid, created = int(entry["hwnd"]), int(entry["pid"]), float(entry.get("created") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        owner = entry.get("owner") or {}
+        if owner.get("pid") and _alive_with_identity(int(owner["pid"]), float(owner.get("created") or 0)):
+            continue  # that instance (possibly this one) still hosts it
+        if _alive_with_identity(pid, created) is None or w.window_pid(hwnd)[0] != pid \
+                or not is_main_window_candidate(hwnd):
+            continue
+        restored += bool(taskbar.show_button(hwnd))
+    return restored
 
 
 def end_orphan(orphan: Orphan) -> str:

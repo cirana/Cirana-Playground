@@ -9,7 +9,7 @@ from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
-from cirana.core.orphans import end_orphan, find_orphans
+from cirana.core.orphans import end_orphan, find_orphans, restore_taskbar_buttons
 from cirana.ui.dialogs import OrphanDialog
 
 from cirana.ui.applications_view import ApplicationsView
@@ -285,8 +285,13 @@ class MainWindow(QWidget):
 
     def check_orphans(self) -> None:
         """Offer to deal with applications that lost their window when CIRANA last ended unexpectedly."""
-        entries = self.ctx.settings.playground_store.load().get("embedded", [])
+        stored = self.ctx.settings.playground_store.load()
+        entries, docked = stored.get("embedded", []), stored.get("docked", [])
+        if docked and restore_taskbar_buttons(docked):
+            log.info("Gave docked windows left by the previous session their taskbar button back")
         if not entries:
+            if docked:
+                self.ctx.playground.clear_persisted_state()
             return
         orphans = find_orphans(entries)
         self.ctx.playground.clear_persisted_state()

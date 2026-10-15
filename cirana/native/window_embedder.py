@@ -18,8 +18,9 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 
+from cirana.native import taskbar
 from cirana.native import win32_api as w
-from cirana.native.window_discovery import WindowInfo, own_pid
+from cirana.native.window_discovery import WindowInfo, is_main_window_candidate, own_pid
 from cirana.native.window_restorer import WindowState, capture_state, restore_state
 
 log = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ class EmbeddedWindow:
     pid: int
     launched_by_cirana: bool
     mode: str = CHILD
+    taskbar_hidden: bool = False  # docked: its taskbar button was removed (ITaskbarList) and must be given back
 
     @property
     def docked(self) -> bool:
@@ -159,6 +161,10 @@ def embed(info: WindowInfo, host_hwnd: int, width: int, height: int, launched_by
         ctypes.set_last_error(0)
         w.SetWindowLongPtrW(hwnd, w.GWL_STYLE, style)
         style_error = ctypes.get_last_error()
+        # A window that asks for its own taskbar button keeps one in some shells even as a child: drop the request
+        # while it is hosted. The captured ex-style (with WS_EX_APPWINDOW) is put back by restore_state.
+        if state.ex_style & w.WS_EX_APPWINDOW:
+            w.SetWindowLongPtrW(hwnd, w.GWL_EXSTYLE, state.ex_style & ~w.WS_EX_APPWINDOW)
         ctypes.set_last_error(0)
         w.SetParent(hwnd, host_hwnd)
         error = ctypes.get_last_error()
@@ -207,6 +213,12 @@ def dock(info: WindowInfo, host_hwnd: int, launched_by_cirana: bool) -> tuple[Em
     if state.maximized or state.minimized:
         w.ShowWindowAsync(info.hwnd, w.SW_RESTORE)  # a maximized window cannot be sized to the tab
     embedded = EmbeddedWindow(info.hwnd, host_hwnd, state, info.pid, launched_by_cirana, mode=DOCKED)
+    # While it lives over a tab, CIRANA's own button stands for it. Only Explorer's button list changes (the window,
+    # its styles and its Alt+Tab entry are untouched); if the shell refuses, the button simply stays.
+    # Only a window that has a button of its own (an owned palette has none: undocking must not invent one).
+    has_button = is_main_window_candidate(info.hwnd) \
+        or bool(int(w.GetWindowLongPtrW(info.hwnd, w.GWL_EXSTYLE)) & w.WS_EX_APPWINDOW)
+    embedded.taskbar_hidden = has_button and taskbar.hide_button(info.hwnd)
     return EmbedResult(EmbedStatus.OK, warnings=compat.warnings), embedded
 
 
@@ -269,6 +281,9 @@ def _undock(embedded: EmbeddedWindow, activate: bool) -> bool:
     w.SetWindowPos(hwnd, None, left, top, right - left, bottom - top,
                    w.SWP_NOZORDER | w.SWP_NOACTIVATE | w.SWP_NOOWNERZORDER | w.SWP_ASYNCWINDOWPOS)
     w.ShowWindowAsync(hwnd, w.SW_SHOWMAXIMIZED if state.maximized else w.SW_SHOWNOACTIVATE)
+    if embedded.taskbar_hidden:  # a normal window again: its own taskbar button comes back
+        taskbar.show_button(hwnd)
+        embedded.taskbar_hidden = False
     if activate and not w.IsHungAppWindow(hwnd):
         w.SetForegroundWindow(hwnd)
     return True
