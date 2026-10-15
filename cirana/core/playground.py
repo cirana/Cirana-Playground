@@ -155,7 +155,8 @@ def hosting_kind(app: AppEntry) -> str:
     if embed_precheck(app):
         return "external"
     exe = app_exe(app)
-    return "docked" if not exe or "\\windowsapps\\" in exe else "tab"
+    docked = not exe or "\\windowsapps\\" in exe or os.path.basename(exe) in embedder.DOCKED_EXECUTABLES
+    return "docked" if docked else "tab"
 
 
 def _frame_content_exes(info: WindowInfo) -> list[str]:

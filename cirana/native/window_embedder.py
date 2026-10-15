@@ -4,10 +4,10 @@ Two mechanisms, chosen per window by :func:`hosting_mode`:
 
 * **child** (classic Win32 apps): the foreign window is converted to a WS_CHILD and re-parented with ``SetParent``
   onto the HWND of a native Qt widget. Qt's ``createWindowContainer`` is *not* mixed in.
-* **docked** (packaged / Store / WinUI / UWP apps, consoles, Explorer): re-parenting crashes or breaks these, so the
-  window stays an ordinary top-level window and CIRANA only keeps it positioned exactly over the tab. Nothing about
-  the window is changed except its position, size and show state, always through posted / async calls; its owner,
-  parent and styles are never touched. It keeps its own title bar, taskbar button and Alt+Tab entry.
+* **docked** (packaged / Store / WinUI / UWP apps, consoles, Explorer, Chromium browsers): re-parenting crashes or
+  breaks these, so the window stays an ordinary top-level window and CIRANA only keeps it positioned exactly over the
+  tab. Nothing about the window is changed except its position, size and show state, always through posted / async
+  calls; its owner, parent and styles are never touched. It keeps its own title bar, taskbar button and Alt+Tab entry.
 
 Nothing here kills a process. Failure paths restore whatever was changed.
 """
@@ -50,6 +50,14 @@ WARN_CLASSES: dict[str, str] = {
 # Windows that must never be re-parented but can be docked (kept over the tab as a top-level window).
 DOCKED_CLASSES = {"ApplicationFrameWindow", "Windows.UI.Core.CoreWindow", "CabinetWClass", "ConsoleWindowClass",
                   "CASCADIA_HOSTING_WINDOW_CLASS"}
+# Chromium browsers only let their address bar take the keyboard while ::GetActiveWindow() is their own window. A
+# re-parented (WS_CHILD) window is the active window only as a leftover of the moment it was embedded: the first click
+# on CIRANA or on the page makes CIRANA's window active, and Windows never makes a child window active again
+# (SetActiveWindow / SetForegroundWindow / SetFocus / WM_ACTIVATE all measured without effect; splitting the shared
+# input queue with AttachThreadInput left no window with the keyboard). Typing in the address bar then went to the
+# web page (measured with Chrome and Brave). Docked, they stay real top-level windows and get real activation.
+# Electron apps share the window class but host only web content, which works as a child, so they are not listed.
+DOCKED_EXECUTABLES = {"chrome.exe", "msedge.exe", "brave.exe"}
 NEVER_HOSTED_CLASSES = {"Progman", "Shell_TrayWnd", "WorkerW"}
 DOCKED_NOTE = ("Docked: this application cannot live inside CIRANA safely, so it stays its own window and is kept "
                "exactly over this tab. It keeps its own title bar and taskbar button.")
@@ -64,7 +72,8 @@ def _packaged_image(exe: str) -> bool:
 
 def hosting_mode(info: WindowInfo) -> str:
     """How a window would be hosted: re-parented (child) or docked over the tab. Inspects, never changes."""
-    return DOCKED if info.class_name in DOCKED_CLASSES or _packaged_image(info.exe) else CHILD
+    docked = info.class_name in DOCKED_CLASSES or _packaged_image(info.exe) or info.exe_name in DOCKED_EXECUTABLES
+    return DOCKED if docked else CHILD
 
 
 class EmbedStatus(str, Enum):

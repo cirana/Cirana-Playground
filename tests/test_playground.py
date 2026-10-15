@@ -51,6 +51,31 @@ class PrecheckTests(unittest.TestCase):
         notepad = make("N", target=r"C:\Program Files\WindowsApps\x\notepad.exe")
         self.assertEqual(playground.hosting_kind(notepad), "docked")
 
+    def test_chromium_browsers_are_docked_but_electron_apps_stay_in_a_tab(self):
+        for exe in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\BRAVE.EXE"):
+            self.assertEqual(playground.hosting_kind(make("Browser", target=exe)), "docked", exe)
+        shortcut = make("Chrome", "shortcut", r"C:\x\Google Chrome.lnk",
+                        exe=r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+        self.assertEqual(playground.hosting_kind(shortcut), "docked")
+        code = make("Code", target=r"C:\Users\u\AppData\Local\Programs\Microsoft VS Code\Code.exe")
+        self.assertEqual(playground.hosting_kind(code), "tab")  # Electron: same window class, but works as a child
+        lookalike = make("Not Chrome", target=r"C:\Tools\chrome-helper.exe")
+        self.assertEqual(playground.hosting_kind(lookalike), "tab")
+
+    def test_hosting_mode_docks_browser_windows_by_executable(self):
+        def window(exe):
+            return WindowInfo(0x10, 1, 1, "Title", "Chrome_WidgetWin_1", exe.lower())
+
+        for exe in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"):
+            self.assertEqual(embedder.hosting_mode(window(exe)), embedder.DOCKED, exe)
+        self.assertEqual(embedder.hosting_mode(window(r"C:\Apps\Discord\Discord.exe")), embedder.CHILD)
+        self.assertEqual(embedder.hosting_mode(WindowInfo(0x10, 1, 1, "Map", "MyDlgClass", r"c:\windows\charmap.exe")),
+                         embedder.CHILD)
+
     def test_classic_programs_listed_by_path_as_aumid_are_ordinary_programs(self):
         charmap = make("Karakter Eşlem", "aumid", r"C:\WINDOWS\System32\charmap.exe")
         self.assertEqual(playground.app_exe(charmap), os.path.normcase(r"C:\WINDOWS\System32\charmap.exe"))
@@ -765,6 +790,31 @@ class PlaygroundUiTests(unittest.TestCase):
             host._check_focus()
             self.assertEqual(len(resizes), 9)  # hidden tab: nothing is touched
             host.show()
+
+    def test_chromium_browser_window_is_docked_never_reparented(self):
+        from cirana.native import win32_api as w
+        from cirana.native.window_restorer import WindowState
+
+        app = self.ctx.registry.add_custom_app("Chrome", r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                                               "executable")
+        browser = WindowInfo(0x9200, 4242, 1, "New Tab - Google Chrome", "Chrome_WidgetWin_1",
+                             r"c:\program files\google\chrome\application\chrome.exe")
+        with mock.patch.object(playground, "wait_for_app_window", return_value=browser), \
+                mock.patch.object(embedder, "embed") as embed, \
+                mock.patch.object(embedder, "dock_compatibility", return_value=embedder.EmbedResult(
+                    embedder.EmbedStatus.OK, warnings=[embedder.DOCKED_NOTE])), \
+                mock.patch.object(embedder, "capture_state",
+                                  return_value=WindowState(0x9200, 0, 0, 0, (0, 0, 9, 9), False, False)), \
+                mock.patch.object(w, "SetParent") as set_parent, \
+                mock.patch.object(w, "SetWindowLongPtrW") as set_long, \
+                mock.patch.object(w, "ShowWindowAsync"), mock.patch.object(w, "SetWindowPos"):
+            session = self.open(app)
+            embed.assert_not_called()  # a WS_CHILD browser can never become the active window again
+            set_parent.assert_not_called()
+            set_long.assert_not_called()
+            self.assertEqual(session.state, SessionState.EMBEDDED)
+            self.assertTrue(session.docked)
+            self.assertTrue(self.view._pages[session.id].host.embedded.docked)
 
     def test_store_app_window_is_docked_never_reparented(self):
         from cirana.native import win32_api as w

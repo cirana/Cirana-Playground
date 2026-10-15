@@ -218,8 +218,9 @@ class PlaygroundView(QWidget):
             "playground",
             "Nothing is running in the Playground",
             "Open an application to run it inside a tab, or move a window that is already open into one. "
-            "Classic Win32 programs move inside the tab. Store apps (Notepad, Calculator, Teams, Outlook...) are "
-            "docked: they stay their own window, kept exactly over the tab. Closing a tab never closes the application.",
+            "Classic Win32 programs move inside the tab. Store apps (Notepad, Calculator, Teams, Outlook...) and "
+            "Chromium browsers (Chrome, Edge, Brave) are docked: they stay their own window, kept exactly over the tab. "
+            "Closing a tab never closes the application.",
         ), 1)
         return holder
 
