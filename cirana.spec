@@ -15,6 +15,7 @@ exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
     name="CIRANA",
+    icon="cirana/assets/icons/main_icon.ico",
     console=False,
     disable_windowed_traceback=False,
     upx=False,

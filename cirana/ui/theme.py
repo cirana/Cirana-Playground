@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QIcon
 
 from cirana.paths import asset_path
 
@@ -71,6 +71,11 @@ def build_stylesheet() -> str:
     for key in sorted(values, key=len, reverse=True):
         raw = re.sub(rf"@{key}\b", values[key], raw)
     return raw
+
+
+def app_icon() -> QIcon:
+    """CIRANA's own icon (window, taskbar, sidebar). The .ico next to it is the same image for the packaged .exe."""
+    return QIcon(str(asset_path("icons", "main_icon.png")))
 
 
 def app_font() -> QFont:

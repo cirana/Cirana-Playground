@@ -1,6 +1,7 @@
 """CIRANA entry point."""
 from __future__ import annotations
 
+import ctypes
 import logging
 import signal
 import sys
@@ -19,7 +20,7 @@ from cirana.ui.app_actions import AppActions
 from cirana.ui.app_icons import AppIconProvider
 from cirana.ui.context import AppContext
 from cirana.ui.main_window import MainWindow
-from cirana.ui.theme import app_font, build_stylesheet
+from cirana.ui.theme import app_font, app_icon, build_stylesheet
 
 log = logging.getLogger("cirana")
 
@@ -27,6 +28,7 @@ log = logging.getLogger("cirana")
 def build_app(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, AppContext]:
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("CIRANA")
+    app.setWindowIcon(app_icon())
     app.setFont(app_font())
     app.setStyleSheet(build_stylesheet())
 
@@ -77,7 +79,16 @@ def _install_safety_nets(app: QApplication) -> None:
     keepalive.start()
 
 
+def _set_app_user_model_id() -> None:
+    """Group CIRANA's windows under its own taskbar button and icon instead of python.exe's (source checkout)."""
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Cirana.Playground")
+    except (AttributeError, OSError):
+        log.debug("Could not set the AppUserModelID", exc_info=True)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _set_app_user_model_id()  # before the first window exists
     app, window, ctx = build_app(argv)
     _install_safety_nets(app)
     window.show()

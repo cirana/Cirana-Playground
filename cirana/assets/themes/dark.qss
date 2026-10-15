@@ -10,7 +10,7 @@ QToolTip { background: @panel; color: @text; border: 1px solid @border; padding:
 
 /* ---- Sidebar ---------------------------------------------------------- */
 QFrame#Sidebar { background: @bg2; border-right: 1px solid @border; }
-QLabel#BrandMark { background: @accent; border-radius: 8px; color: @on_accent; font-weight: 800; font-size: 15px; }
+QLabel#BrandMark { background: transparent; }
 QLabel#BrandName { font-family: "Segoe UI Variable Display", "Segoe UI"; font-size: 15px; font-weight: 700; letter-spacing: 2px; }
 QPushButton#NavButton {
     background: transparent; border: none; border-radius: 8px; padding: 8px 12px;

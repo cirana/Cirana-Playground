@@ -40,6 +40,16 @@ class UiSmokeTests(unittest.TestCase):
         self.window._refresh_timer.stop()
         self.window._refresh_current()
 
+    def test_app_icon_is_used_for_windows_and_the_sidebar(self):
+        from PySide6.QtGui import QImage
+
+        from cirana.paths import asset_path
+
+        self.assertFalse(self.app.windowIcon().isNull())
+        self.assertFalse(self.window.windowIcon().isNull())
+        self.assertFalse(self.window.sidebar.mark.pixmap().isNull())
+        self.assertFalse(QImage(str(asset_path("icons", "main_icon.ico"))).isNull())  # the packaged .exe's icon
+
     def test_all_pages_render(self):
         for key in ("home", "applications", "workspaces", "playground", "favorites", "settings"):
             self.window.show_page(key, save=False)

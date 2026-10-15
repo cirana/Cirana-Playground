@@ -5,7 +5,7 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
 from cirana.ui.icons import icon
-from cirana.ui.theme import ACCENT, TEXT2
+from cirana.ui.theme import ACCENT, TEXT2, app_icon
 
 NAV_ITEMS: list[tuple[str, str, str]] = [
     ("home", "Home", "home"),
@@ -33,10 +33,11 @@ class Sidebar(QFrame):
 
         brand = QHBoxLayout()
         brand.setContentsMargins(4, 0, 0, 0)
-        self.mark = QLabel("C")
+        self.mark = QLabel()
         self.mark.setObjectName("BrandMark")
         self.mark.setFixedSize(34, 34)
         self.mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mark.setPixmap(app_icon().pixmap(QSize(34, 34)))
         self.name = QLabel("CIRANA")
         self.name.setObjectName("BrandName")
         brand.addWidget(self.mark)
