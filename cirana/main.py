@@ -23,6 +23,7 @@ from cirana.ui.app_icons import AppIconProvider
 from cirana.ui.context import AppContext
 from cirana.ui.main_window import MainWindow
 from cirana.ui.theme import app_font, app_icon, build_stylesheet
+from cirana.ui.tiling_overlay import TilingOverlays
 from cirana.wm.controller import WindowController
 from cirana.wm.tracker import WindowTracker
 
@@ -51,6 +52,7 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
     actions.workspaces = workspaces
     wm = WorkspaceController(workspaces, registry, windows, window_control, WorkspaceLauncher(registry, windows))
     tiler = DynamicTiler(wm, settings)
+    overlays = TilingOverlays(tiler, settings)
     ctx = AppContext(
         settings=settings,
         registry=registry,
@@ -63,11 +65,13 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
         window_control=window_control,
         wm=wm,
         tiler=tiler,
+        overlays=overlays,
     )
     window = MainWindow(ctx)
     tracker.set_apps(registry.all_apps())
     registry.changed.connect(lambda: tracker.set_apps(registry.all_apps()))
     app.aboutToQuit.connect(tiler.stop)  # first: nothing is arranged any more while CIRANA shuts down
+    app.aboutToQuit.connect(overlays.stop)
     app.aboutToQuit.connect(windows.stop)
     app.aboutToQuit.connect(tracker.shutdown)
     app.aboutToQuit.connect(scanner.shutdown)

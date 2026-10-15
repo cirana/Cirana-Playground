@@ -22,6 +22,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "global_tiling": False,
     "global_layout": {},
     "tiling_exclusions": [],
+    "tiling_borders": True,  # focus borders around tiled windows
 }
 
 

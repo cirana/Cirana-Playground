@@ -364,3 +364,40 @@ class LiveGlobalTilingTests(unittest.TestCase):
         self.assertTrue(self.wait(lambda: at(survivor, alone)), "the remaining window did not fill the screen")
         self.assertEqual({hwnd: tracker.backend.frame_rect(hwnd) for hwnd in before if w.IsWindow(hwnd)},
                          {hwnd: rect for hwnd, rect in before.items() if w.IsWindow(hwnd)})  # nothing else moved
+
+
+@unittest.skipUnless(LIVE, "live desktop test: set CIRANA_LIVE=1")
+class LiveOverlayTests(unittest.TestCase):
+    """Borders and drop preview on the real Windows Qt platform (a separate process: the suite runs offscreen)."""
+
+    def test_borders_and_preview_on_the_real_desktop(self):
+        import json
+
+        from cirana.native import win32_api as w
+
+        home = tempfile.mkdtemp(prefix="cirana-live-overlay-")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
+        done = subprocess.run([sys.executable, "-m", "tests.live_overlay_script", home], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=90)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        out = json.loads(done.stdout.strip().splitlines()[-1])
+        wanted_ex = w.WS_EX_TOOLWINDOW | w.WS_EX_NOACTIVATE | 0x20 | 0x80000  # tool, no-activate, transparent, layered
+        for helper in out["helpers"]:
+            t = helper["thickness"]
+            frame = helper["frame"]
+            expected = [frame[0] - t, frame[1] - t, frame[2] + t, frame[3] + t]
+            self.assertLessEqual(max(abs(x - y) for x, y in zip(helper["border"], expected)), 1, helper)
+            self.assertEqual(helper["ex_style"] & wanted_ex, wanted_ex)
+            self.assertFalse(helper["ex_style"] & 0x8)  # WS_EX_TOPMOST: borders are not stuck on top of everything
+            self.assertFalse(helper["ex_style"] & w.WS_EX_APPWINDOW)  # no taskbar button / Alt+Tab entry
+            self.assertTrue(helper["above"], "the border is not directly above its window")
+            self.assertFalse(helper["in_inventory"])
+        self.assertEqual(out["focus"], [False, True])
+        self.assertTrue(out["preview"]["visible"])
+        # Qt may round an odd physical size by a pixel at fractional scaling (e.g. 125 %)
+        self.assertLessEqual(max(abs(x - y) for x, y in zip(out["preview"]["rect"], out["preview"]["target"])), 1)
+        self.assertEqual(out["preview"]["ex_style"] & wanted_ex, wanted_ex)
+        self.assertTrue(out["preview_hidden"])
+        self.assertFalse(out["foreground_is_overlay"])
+        self.assertTrue(out["cleared"])

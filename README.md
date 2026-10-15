@@ -143,6 +143,18 @@ layout. The switch, the layout and the floating programs are kept in `config.jso
 every window: a workspace's own tiling steps aside, and activating a workspace still opens and raises its
 applications. Everything below (triggers, no loop, drags, refusals, cancellation) applies to both scopes.
 
+**Focus borders and drop preview** (`ui/tiling_overlay.py`). Every window dynamic tiling manages (either scope) gets a
+thin border: accent green `#C3E85B` for the focused window, grey `#2A2D34` for the others (2 px, scaled with the
+monitor's DPI; *Borders* on the Windows page switches them off). Colours follow `WindowTracker.foreground_changed`;
+borders follow moves and resizes, sit directly above their window in the z-order, and disappear for minimized,
+maximized, full-screen, closed or no longer managed windows, on a workspace switch and when tiling is turned off.
+While a tiled window is dragged, a translucent grey rectangle shows exactly where it will land (`DynamicTiler.
+predict_drop`, the same rules the drop uses: swap with the tile under its centre, join another monitor's layout, or
+back to its own tile); it hides when there is no target and when the drag ends or is cancelled. Both are CIRANA's
+own frameless tool windows, transparent for mouse and keyboard, never activated, without taskbar button or Alt+Tab
+entry, and invisible to the window tracker; only they are positioned (in physical pixels), never the applications.
+At fractional scaling Qt may round an overlay's size by one pixel.
+
 **One workspace.** A per-workspace switch (*Dynamic tiling* in the layout panel, stored with the layout as `"dynamic"`; records written
 before it existed read as off). While it is on **and** the workspace is the active one, its tiled layout (side by
 side, main + side panel, grids) follows its windows by itself:

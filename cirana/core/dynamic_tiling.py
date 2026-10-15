@@ -83,6 +83,9 @@ class Group:
 class DynamicTiler(QObject):
     reflowed = Signal(str)  # scope: workspace id, or GLOBAL
     state_changed = Signal(str)  # scope: paused / resumed (a drag), all-window tiling switched, floats changed
+    # While the user drags a tiled window: where it will land if dropped now (visible frame, physical pixels), or
+    # None (no valid target, or the drag is over). Computed with the same rules the drop itself uses.
+    drop_preview = Signal(object)
 
     def __init__(self, wm: WorkspaceController, settings=None, debounce_ms: int = DEBOUNCE_MS,  # noqa: ANN001
                  display_debounce_ms: int = DISPLAY_DEBOUNCE_MS) -> None:
@@ -105,6 +108,7 @@ class DynamicTiler(QObject):
         self._shown: dict[str, tuple] = {}  # window key -> (minimized, maximized, resizable) last seen
         self._history: deque[float] = deque()
         self._last_groups: list[Group] = []
+        self._preview: Rect | None = None
         self.count = 0  # re-tiles started (diagnostics and tests)
         self._debounce = debounce_ms
         self._timer = QTimer(self, singleShot=True)
@@ -213,6 +217,18 @@ class DynamicTiler(QObject):
             return [Group(workspace_id, spec, self.tile_set(workspace_id))]
         return []
 
+    def managed_windows(self) -> list[TrackedWindow]:
+        """The windows dynamic tiling is in charge of right now (either scope); [] when it is off."""
+        if not self.in_charge():
+            return []
+        return [window for group in self._groups() for _slot, window in group.slots]
+
+    def target_of(self, window_key: str) -> Rect | None:
+        """Where the last re-tile put this window (None: not tiled by it)."""
+        slot = next((s for group in self._last_groups for s, w in group.slots if w.key == window_key), None)
+        target = self._targets.get(slot) if slot is not None else None
+        return target[1] if target is not None else None
+
     def _monitors(self) -> list[Monitor]:
         try:
             return self.wm.tracker.backend.monitors()
@@ -280,10 +296,14 @@ class DynamicTiler(QObject):
     def _on_removed(self, window: TrackedWindow) -> None:
         self._shown.pop(window.key, None)
         self._home.pop(window.key, None)
-        self._dragging.discard(window.key)
+        if window.key in self._dragging:
+            self._dragging.discard(window.key)
+            self._set_preview(None)
         self.schedule()
 
     def _on_changed(self, window: TrackedWindow) -> None:
+        if window.key in self._dragging:
+            self._update_preview(window)
         # Moves (CIRANA's own included) are never a trigger; a change of state is (for all-window tiling: any
         # window; for a workspace the controller reports its bound windows' changes through statuses_changed).
         state = (window.minimized, window.maximized, window.resizable)
@@ -297,6 +317,7 @@ class DynamicTiler(QObject):
         self._cancel()
         self._signature = None
         self._dragging.clear()
+        self._set_preview(None)
         self._targets.clear()
         self._last_groups = []
         self.schedule()
@@ -334,13 +355,59 @@ class DynamicTiler(QObject):
             self._dragging.add(window.key)
             self._cancel()  # never move a window while the user holds it (or one of its neighbours)
             self.state_changed.emit(self._scope())
+            self._update_preview(window)
             return
         self._dragging.discard(window.key)
+        self._set_preview(None)
         slot = tiled.get(window.key)
         if slot is not None:
             self._dropped(slot, window)
         self.state_changed.emit(self._scope())
         self.schedule(force=True)  # the drag is over: back into the layout
+
+    # -- drop preview --------------------------------------------------------------------------------------------
+    def _set_preview(self, rect: Rect | None) -> None:
+        if rect != self._preview:
+            self._preview = rect
+            self.drop_preview.emit(rect)
+
+    def _update_preview(self, window: TrackedWindow) -> None:
+        if not self.in_charge() or window.minimized or window.maximized:
+            self._set_preview(None)
+            return
+        slot = next((s for group in self._last_groups for s, w in group.slots if w.key == window.key), None)
+        self._set_preview(self.predict_drop(slot, window.rect) if slot is not None else None)
+
+    def predict_drop(self, slot: str, frame: Rect) -> Rect | None:
+        """Where the window of ``slot`` lands if it is dropped with its visible frame at ``frame``: exactly what
+        _dropped + the following re-tile do (swap with the tile under its centre, join another monitor's layout,
+        or back to its own tile). None when there is no valid target."""
+        own = self._targets.get(slot)
+        center = _center(frame)
+        target = next((rect for other, (_g, rect) in self._targets.items()
+                       if other != slot and _center_in(rect, center)), None)
+        if target is not None:
+            return target  # a swap: it takes the other window's tile
+        if self.global_on:
+            monitors = self._monitors()
+            monitor = monitor_for_rect(frame, monitors)
+            if monitor is None:
+                return None  # off every monitor: nothing to show
+            if monitor.device != self._home.get(slot):
+                return self._joined_rect(slot, monitor, monitors)
+        return own[1] if own is not None else None
+
+    def _joined_rect(self, slot: str, monitor: Monitor, monitors: list[Monitor]) -> Rect | None:
+        """Its tile in ``monitor``'s layout once it belongs there (the order of joining decides its place)."""
+        from cirana.wm.layout import tile
+
+        tiled = {key for group in self._last_groups for key, _w in group.slots}
+        members = [key for key in self._order if key in tiled and (
+            key == slot or resolve(MonitorRef(self._home.get(key, "")), monitors).device == monitor.device)]
+        if slot not in members:
+            return None
+        spec = self.global_layout()
+        return tile(spec, monitor.work, len(members), monitor.scale)[members.index(slot)]
 
     def _dropped(self, slot: str, window: TrackedWindow) -> None:
         try:

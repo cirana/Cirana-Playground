@@ -12,6 +12,7 @@ from cirana.core.workspaces import WorkspaceManager
 from cirana.storage.settings_manager import SettingsManager
 from cirana.ui.app_actions import AppActions
 from cirana.ui.app_icons import AppIconProvider
+from cirana.ui.tiling_overlay import TilingOverlays
 from cirana.wm.controller import WindowController
 from cirana.wm.tracker import WindowTracker
 
@@ -29,6 +30,7 @@ class AppContext:
     window_control: WindowController
     wm: WorkspaceController  # workspaces at runtime: bindings, activation, layouts
     tiler: DynamicTiler  # re-tiles the active workspace as its windows come and go (when switched on)
+    overlays: TilingOverlays  # focus borders and the drop preview (cirana.ui.tiling_overlay)
 
     @property
     def view_mode(self) -> str:

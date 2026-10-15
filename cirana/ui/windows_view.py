@@ -159,6 +159,12 @@ class WindowsView(QWidget):
         self.tiling_ratio.valueChanged.connect(self._tiling_edited)
         for widget in (self.tiling_kind, self.tiling_gap, self.tiling_ratio):
             row.addWidget(widget)
+        self.tiling_borders = QCheckBox("Borders")
+        self.tiling_borders.setToolTip("A thin border around every tiled window: green for the focused one, grey for "
+                                       "the others")
+        self.tiling_borders.toggled.connect(
+            lambda on: None if self._syncing else self.ctx.overlays.set_borders_enabled(on))
+        row.addWidget(self.tiling_borders)
         self.tiling_state = label("", "TilingState")
         self.tiling_state.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         row.addWidget(self.tiling_state, 1)
@@ -175,6 +181,7 @@ class WindowsView(QWidget):
             self.tiling_kind.setCurrentIndex(index)
             self.tiling_gap.setValue(spec.gap)
             self.tiling_ratio.setValue(round(spec.ratio * 100))
+            self.tiling_borders.setChecked(self.ctx.overlays.borders_enabled)
         finally:
             self._syncing = False
         self.tiling_ratio.setVisible(spec.kind == MAIN_SIDE)
