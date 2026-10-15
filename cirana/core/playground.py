@@ -243,6 +243,9 @@ class PlaygroundManager(QObject):
         self._jobs: dict[str, Job] = {}
         self._attacher: Attacher | None = None
         self._owner = self._process_identity(os.getpid())
+        # Sessions whose (hung) window is still parented to a host although the session was detached or its tab
+        # closed. Their recovery record stays until the view has verified that the window left the host.
+        self._unreleased: dict[str, PlaygroundSession] = {}
         self.current_id = ""  # session whose tab is selected (kept up to date by the view)
 
     # -- registration / queries -----------------------------------------------------
@@ -454,16 +457,32 @@ class PlaygroundManager(QObject):
         except psutil.Error:
             return {"pid": pid, "created": 0.0}
 
-    def _persist(self, keep: set[str] | None = None) -> None:
-        """``keep``: only these sessions (used at shutdown for windows that could not be handed back yet)."""
+    def hold_record(self, session_id: str) -> None:
+        """Keep the session's recovery record: its window has not left the host yet (a hung application)."""
+        session = self._sessions.get(session_id) or self._unreleased.get(session_id)
+        if session is not None and session_id not in self._unreleased:
+            self._unreleased[session_id] = session
+            self._persist()
+
+    def release_record(self, session_id: str) -> None:
+        """The window was verified to have left its host (or no longer exists): the held record may go."""
+        if self._unreleased.pop(session_id, None) is not None:
+            self._persist()
+
+    def unreleased_ids(self) -> list[str]:
+        return list(self._unreleased)
+
+    def _persist(self, only_unreleased: bool = False) -> None:
+        """``only_unreleased``: just the held records (at shutdown, every other window was handed back)."""
+        sessions = [] if only_unreleased else list(self._sessions.values())
+        sessions += [s for i, s in self._unreleased.items() if only_unreleased or i not in self._sessions]
         entries = []
-        for session in self._sessions.values():
-            if keep is not None and session.id not in keep:
-                continue
+        for session in sessions:
             # Docked windows survive a CIRANA crash with their window intact, so they need no recovery; and for UWP
             # apps the pid is ApplicationFrameHost.exe, which hosts every UWP app: never offer to end that.
-            # A kept session may already say DETACHED: its window is still in the host all the same.
-            if (keep is not None or session.state is SessionState.EMBEDDED) and session.pid and not session.docked:
+            # A held session may already say DETACHED (or be gone): its window is still in the host all the same.
+            if (session.state is SessionState.EMBEDDED or session.id in self._unreleased) and session.pid \
+                    and not session.docked:
                 identity = self._process_identity(session.pid)
                 entries.append({
                     "session": session.id, "app_id": session.app_id, "title": session.title, "exe": session.exe,
@@ -474,11 +493,11 @@ class PlaygroundManager(QObject):
         except (OSError, ValueError):
             log.exception("Could not write the playground session file")
 
-    def clear_persisted_state(self, keep: set[str] | None = None) -> None:
-        """Forget the crash-recovery records, except those of the ``keep`` sessions: their windows are still
-        parented to a host, so they stay recoverable on the next start if CIRANA ends before they are released."""
-        if keep:
-            self._persist(keep)
+    def clear_persisted_state(self) -> None:
+        """Forget the crash-recovery records, except held ones: those windows are still parented to a host, so they
+        stay recoverable on the next start if CIRANA ends before they are released."""
+        if self._unreleased:
+            self._persist(only_unreleased=True)
             return
         try:
             self._settings.playground_store.save({"embedded": []})

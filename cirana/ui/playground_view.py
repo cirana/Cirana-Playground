@@ -340,6 +340,7 @@ class PlaygroundView(QWidget):
         was_hosted = page.host.embedded is not None
         if was_hosted:
             page.detach(activate=True)
+        self._sync_record(sid, page)  # before the session is forgotten, so a pending window never loses its record
         self.manager.remove_session(sid)  # emits session_removed -> _drop_tab
         self._drop_tab(sid)
         if was_hosted:
@@ -363,13 +364,28 @@ class PlaygroundView(QWidget):
         self._update_empty()
         self._on_current_changed(self.tabs.currentIndex())
 
+    def _sync_record(self, sid: str, page: SessionPage, watch: bool = True) -> None:
+        """Hold the recovery record while the window is still parented to the host; drop the hold only once it has
+        verifiably left. ``watch``: keep checking until it does."""
+        if page.host.restore_pending():
+            self.manager.hold_record(sid)
+            if watch:
+                self._limbo_timer.start()
+        else:
+            self.manager.release_record(sid)
+
     def _sweep_limbo(self) -> None:
+        limbo = {page.session_id: page for page in self._limbo}
+        for sid in self.manager.unreleased_ids():
+            page = self._pages.get(sid) or limbo.get(sid)
+            if page is not None:
+                self._sync_record(sid, page, watch=False)
         waiting = [page for page in self._limbo if page.host.restore_pending()]
         for page in self._limbo:
             if page not in waiting:
                 page.deleteLater()
         self._limbo = waiting
-        if not waiting:
+        if not waiting and not self.manager.unreleased_ids():
             self._limbo_timer.stop()
 
     def _close_current(self) -> None:
@@ -392,6 +408,7 @@ class PlaygroundView(QWidget):
         was_hosted = page.host.embedded is not None
         restored = page.detach(activate=True)
         if was_hosted:
+            self._sync_record(sid, page)  # a hung window stays in the host: keep its record past the state change
             self.manager.update_state(sid, SessionState.DETACHED, "")
             if restored:
                 self._say(f"Detached {session.title}. It is a normal window again and is still running.")
@@ -429,6 +446,7 @@ class PlaygroundView(QWidget):
         except PermissionError as exc:
             self._say(str(exc))
             return
+        self._sync_record(sid, page)
         self.manager.update_state(sid, SessionState.DETACHED, "")
         QTimer.singleShot(2000, lambda: self._after_close_request(sid))
 
@@ -644,9 +662,11 @@ class PlaygroundView(QWidget):
         for page in list(self._pages.values()):
             if page.host.embedded is not None:
                 restored += 1 if page.detach() else 0
-        # A hung application may still hold its window inside a host: its recovery record has to survive this exit.
-        # Checked on every page (not only those detached just now) so that a repeated call keeps the record too.
-        pending = {sid for sid, page in self._pages.items() if page.host.restore_pending()}
+        # A hung application may still hold its window inside a host (an open tab or a closed one waiting in limbo):
+        # its recovery record has to survive this exit. Checked on every page, not only those detached just now, so
+        # that a repeated call keeps the record too.
+        for sid, page in [*self._pages.items(), *((page.session_id, page) for page in self._limbo)]:
+            self._sync_record(sid, page, watch=False)
         self.manager.shutdown()
-        self.manager.clear_persisted_state(keep=pending)
+        self.manager.clear_persisted_state()
         return restored

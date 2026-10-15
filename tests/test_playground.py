@@ -494,6 +494,87 @@ class PlaygroundUiTests(unittest.TestCase):
             self.assertEqual([e["session"] for e in self.ctx.settings.playground_store.load()["embedded"]],
                              [session.id])
 
+    def recorded(self):
+        return [e["session"] for e in self.ctx.settings.playground_store.load()["embedded"]]
+
+    def hung_host(self, page, current_parent):
+        """Win32 as seen by a host whose hung application keeps its window parented until current_parent changes."""
+        from contextlib import ExitStack
+
+        from cirana.widgets import native_host
+
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(embedder, "detach", return_value=False))
+        stack.enter_context(mock.patch.object(embedder, "request_close", return_value=True))
+        stack.enter_context(mock.patch.object(native_host.w, "IsWindow", return_value=True))
+        stack.enter_context(mock.patch.object(native_host.w, "GetParent", side_effect=lambda _h: current_parent[0]))
+        return stack
+
+    def test_detaching_a_hung_window_keeps_its_record_until_it_leaves_the_host(self):
+        session = self.open(self.add_app("Hung Detach"))
+        page = self.view._pages[session.id]
+        parent = [int(page.host.winId())]
+        with self.hung_host(page, parent):
+            self.view.detach(session.id)
+            self.assertEqual(self.manager.get(session.id).state, SessionState.DETACHED)
+            self.assertEqual(self.recorded(), [session.id])  # not dropped by the state change
+            self.view._sweep_limbo()
+            self.assertEqual(self.recorded(), [session.id])  # still in the host
+            parent[0] = 0  # the application answered and took its window back
+            self.view._sweep_limbo()
+            self.assertEqual(self.recorded(), [])
+            self.assertFalse(self.view._limbo_timer.isActive())
+
+    def test_closing_the_tab_of_a_hung_window_keeps_its_record_while_in_limbo(self):
+        session = self.open(self.add_app("Hung Close Tab"))
+        page = self.view._pages[session.id]
+        parent = [int(page.host.winId())]
+        with self.hung_host(page, parent):
+            self.view.close_tab(session.id)
+            self.assertIsNone(self.manager.get(session.id))
+            self.assertEqual(self.view._limbo, [page])
+            self.assertEqual(self.recorded(), [session.id])
+            self.view._sweep_limbo()
+            self.assertEqual(self.recorded(), [session.id])
+            parent[0] = 0
+            self.view._sweep_limbo()
+            self.assertEqual(self.view._limbo, [])
+            self.assertEqual(self.recorded(), [])
+
+    def test_close_request_to_a_hung_window_keeps_its_record(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        session = self.open(self.add_app("Hung Close App"))
+        page = self.view._pages[session.id]
+        parent = [int(page.host.winId())]
+        with self.hung_host(page, parent), \
+                mock.patch("cirana.ui.playground_view.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            self.view.close_application(session.id)
+            self.assertEqual(self.recorded(), [session.id])
+            parent[0] = 0
+            self.view._sweep_limbo()
+            self.assertEqual(self.recorded(), [])
+
+    def test_shutdown_keeps_the_record_of_a_closed_tab_waiting_in_limbo(self):
+        hung, fine = self.open(self.add_app("Limbo")), self.open(self.add_app("Fine Too"))
+        page = self.view._pages[hung.id]
+        parent = [int(page.host.winId())]
+        with self.hung_host(page, parent):
+            self.view.close_tab(hung.id)
+            self.view.shutdown()
+            self.assertEqual(self.recorded(), [hung.id])  # the cleanly detached one is forgotten, the hung one not
+            self.view.shutdown()
+            self.assertEqual(self.recorded(), [hung.id])
+            parent[0] = 0
+            self.view._sweep_limbo()
+            self.assertEqual(self.view._limbo, [])
+
+    def test_a_window_that_left_the_host_releases_its_record_at_once(self):
+        session = self.open(self.add_app("Answers"))
+        self.view.detach(session.id)  # the default fakes restore it immediately
+        self.assertEqual(self.recorded(), [])
+        self.assertEqual(self.manager.unreleased_ids(), [])
+
     def test_startup_orphan_check_never_ends_anything_without_confirmation(self):
         from PySide6.QtWidgets import QMessageBox
 
