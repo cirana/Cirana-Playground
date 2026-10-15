@@ -49,6 +49,8 @@ class NativeHost(QWidget):
         self._pointer_inside = False
         self._app_active = False  # what the hosted application was last told about its activation
         self._docked_minimized = False  # a docked window was minimized together with CIRANA
+        self._misplaced_streak = 0  # corrections of the same rectangle that did not take (see _keep_in_place)
+        self._misplaced_rect: tuple[int, int, int, int] | None = None
 
     @property
     def embedded(self) -> embedder.EmbeddedWindow | None:
@@ -79,6 +81,7 @@ class NativeHost(QWidget):
             self._watch.start()
             self._app_active = True  # it was the foreground window a moment ago
             self._docked_minimized = False
+            self._misplaced_streak, self._misplaced_rect = 0, None
             self._focus_watch.start()
             if embedded.docked:
                 self.window().installEventFilter(self)  # follow the main window while it is dragged
@@ -163,6 +166,7 @@ class NativeHost(QWidget):
             self._pointer_inside = False
             self._set_app_active(False)
             return
+        self._keep_in_place(embedded)
         root = int(w.GetAncestor(int(self.winId()), w.GA_ROOT) or 0)
         foreground = int(w.GetForegroundWindow() or 0)
         if foreground != root:
@@ -181,6 +185,24 @@ class NativeHost(QWidget):
         if (entered or (inside and pressed)) and QApplication.activePopupWidget() is None \
                 and not embedder.has_focus(embedded):
             self.focus_embedded()
+
+    def _keep_in_place(self, embedded: embedder.EmbeddedWindow) -> None:
+        """Put a child window back into its slot when it moved or resized itself (e.g. a Chromium title-bar drag).
+
+        The request is posted (SWP_ASYNCWINDOWPOS). A window that keeps a slightly different size of its own (DPI
+        scaling of a window with another awareness) is corrected a few times and then left alone instead of being
+        resized 20 times a second."""
+        width, height = self._device_size()
+        if not embedder.misplaced(embedded, width, height):
+            self._misplaced_streak, self._misplaced_rect = 0, None
+            return
+        rect = w.window_rect(embedded.hwnd)
+        if rect != self._misplaced_rect:  # it moved again (a drag in progress): keep correcting
+            self._misplaced_streak, self._misplaced_rect = 0, rect
+        if self._misplaced_streak >= 3:
+            return
+        self._misplaced_streak += 1
+        embedder.resize(embedded, width, height)
 
     # -- docked mode ----------------------------------------------------------------------------------
     def _root(self) -> int:

@@ -272,6 +272,21 @@ def resize(embedded: EmbeddedWindow, width: int, height: int) -> bool:
                                w.SWP_NOZORDER | w.SWP_NOACTIVATE | w.SWP_ASYNCWINDOWPOS))
 
 
+def misplaced(embedded: EmbeddedWindow, width: int, height: int) -> bool:
+    """True if a child-mode window left its slot in the host (top-left corner, ``width`` x ``height``).
+
+    Chromium draws its own title bar and answers WM_NCHITTEST with HTCAPTION there, so dragging it runs the system
+    move loop on the (now child) window and moves it inside the host. Measured with Chrome on Windows 11: a drag
+    moved it by the drag distance and nothing put it back until the next resize. GetWindowRect sends
+    nothing, so this is safe to poll even for a hung application.
+    """
+    if embedded.docked or not w.IsWindow(embedded.hwnd):
+        return False
+    left, top, right, bottom = w.window_rect(embedded.hwnd)
+    host_left, host_top, _, _ = w.window_rect(embedded.host)
+    return (left, top, right - left, bottom - top) != (host_left, host_top, max(width, 1), max(height, 1))
+
+
 def is_alive(embedded: EmbeddedWindow) -> bool:
     return bool(w.IsWindow(embedded.hwnd))
 

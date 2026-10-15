@@ -109,6 +109,19 @@ class EmbedderFocusTests(unittest.TestCase):
             embedder.focus(self.embedded)
         self.assertEqual(self.calls, [])
 
+    def test_misplaced_detects_a_child_window_moved_or_resized_inside_the_host(self):
+        rects = {0x55: (100, 200, 900, 800), 0x77: (100, 200, 900, 800)}
+        with mock.patch.object(embedder.w, "window_rect", side_effect=lambda h: rects[h]):
+            self.assertFalse(embedder.misplaced(self.embedded, 800, 600))
+            rects[0x77] = (-68, 340, 732, 940)  # dragged by its own (Chromium) title bar
+            self.assertTrue(embedder.misplaced(self.embedded, 800, 600))
+            rects[0x77] = (100, 200, 700, 800)  # resized itself
+            self.assertTrue(embedder.misplaced(self.embedded, 800, 600))
+            docked = embedder.EmbeddedWindow(0x77, 0x55, self.embedded.state, 9, True, mode=embedder.DOCKED)
+            self.assertFalse(embedder.misplaced(docked, 800, 600))  # docked windows are placed by place_docked
+        with mock.patch.object(embedder.w, "IsWindow", return_value=False):
+            self.assertFalse(embedder.misplaced(self.embedded, 800, 600))
+
     def test_deactivation_is_never_posted_to_a_window_that_is_not_hosted(self):
         with mock.patch.object(embedder.w, "GetParent", return_value=0):
             embedder.set_active(self.embedded, False)
@@ -711,6 +724,47 @@ class PlaygroundUiTests(unittest.TestCase):
             state["fg"] = root  # back to CIRANA: activation and keyboard focus are given back
             host._check_focus()
             self.assertEqual(focus.call_count, 3)
+
+    def test_hosted_window_dragged_away_is_put_back_into_the_host(self):
+        from cirana.widgets import native_host
+
+        session = self.open(self.add_app("Psi"))
+        host = self.view._pages[session.id].host
+        host._focus_watch.stop()  # driven by hand below
+        size = host._device_size()
+        root = 0x500
+        box = {"rect": (0, 0, *size), "fixable": True}
+        nw = native_host.w
+
+        def resize(e, width, height):
+            resizes.append((width, height))
+            if box["fixable"]:
+                box["rect"] = (0, 0, width, height)
+
+        resizes = []
+        with mock.patch.object(nw, "GetAncestor", return_value=root),                 mock.patch.object(nw, "GetForegroundWindow", return_value=root),                 mock.patch.object(nw, "mouse_button_down", return_value=False),                 mock.patch.object(nw, "cursor_pos", return_value=(10, 10)),                 mock.patch.object(nw, "window_rect", side_effect=lambda h: box["rect"]),                 mock.patch.object(embedder, "misplaced", side_effect=lambda e, wd, ht: box["rect"] != (0, 0, wd, ht)),                 mock.patch.object(embedder, "resize", side_effect=resize),                 mock.patch.object(embedder, "contains_point", return_value=False):
+            host._check_focus()
+            self.assertEqual(resizes, [])  # in place: nothing is sent
+            for step in range(1, 6):  # a title-bar drag in progress: every new position is corrected
+                box["rect"] = (-12 * step, 10 * step, size[0] - 12 * step, size[1] + 10 * step)
+                box["fixable"] = False  # the move loop wins until the button is released
+                host._check_focus()
+            self.assertEqual(len(resizes), 5)
+            box["fixable"] = True  # released: the next correction sticks
+            host._check_focus()
+            self.assertEqual(box["rect"], (0, 0, *size))
+            self.assertEqual(resizes[-1], size)
+            host._check_focus()
+            self.assertEqual(len(resizes), 6)  # back in place: nothing more is sent
+            box["rect"], box["fixable"] = (0, 0, size[0] + 1, size[1]), False  # keeps a size of its own (DPI)
+            for _ in range(10):
+                host._check_focus()
+            self.assertEqual(len(resizes), 9)  # corrected a few times, then left alone instead of 20 times a second
+            host.hide()
+            box["rect"] = (50, 50, 60, 60)
+            host._check_focus()
+            self.assertEqual(len(resizes), 9)  # hidden tab: nothing is touched
+            host.show()
 
     def test_store_app_window_is_docked_never_reparented(self):
         from cirana.native import win32_api as w
