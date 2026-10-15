@@ -56,7 +56,7 @@ class Win32Fakes:
             mock.patch.object(w, "SetWindowPos", side_effect=move or (lambda *a: 1)),
             mock.patch.object(w, "ShowWindowAsync"), mock.patch.object(w, "ShowWindow"),
             mock.patch.object(embedder, "restore_state", return_value=True),
-            mock.patch.object(embedder, "is_restored", return_value=restored),
+            mock.patch.object(embedder, "restore_mismatch", return_value=[] if restored else ["styles WS_CHILD"]),
             mock.patch.object(embedder, "is_main_window_candidate", return_value=True),
             mock.patch.object(taskbar, "hide_button", return_value=True),
         ]
@@ -173,12 +173,18 @@ class RightsTests(unittest.TestCase):
 
 
 class RestoreCheckTests(unittest.TestCase):
-    def check(self, parent, style, ex_style):
+    def mismatch(self, parent=0, style=ORIGINAL.style, ex_style=ORIGINAL.ex_style, zoomed=False, iconic=False,
+                 state=ORIGINAL):
         with mock.patch.object(w, "IsWindow", return_value=True), \
                 mock.patch.object(w, "GetParent", return_value=parent), \
                 mock.patch.object(w, "GetWindowLongPtrW",
-                                  side_effect=lambda h, i: style if i == w.GWL_STYLE else ex_style):
-            return embedder.is_restored(ORIGINAL)
+                                  side_effect=lambda h, i: style if i == w.GWL_STYLE else ex_style), \
+                mock.patch.object(w, "IsZoomed", return_value=zoomed), \
+                mock.patch.object(w, "IsIconic", return_value=iconic):
+            return embedder.restore_mismatch(state)
+
+    def check(self, parent, style, ex_style):
+        return not self.mismatch(parent, style, ex_style)
 
     def test_only_what_cirana_changes_is_compared(self):
         self.assertTrue(self.check(0, ORIGINAL.style, ORIGINAL.ex_style))
@@ -186,6 +192,62 @@ class RestoreCheckTests(unittest.TestCase):
         self.assertFalse(self.check(HOST, ORIGINAL.style, ORIGINAL.ex_style))  # still parented to the host
         self.assertFalse(self.check(0, (ORIGINAL.style & ~w.WS_CAPTION) | w.WS_CHILD, ORIGINAL.ex_style))
         self.assertFalse(self.check(0, ORIGINAL.style, ORIGINAL.ex_style | w.WS_EX_APPWINDOW))
+
+    def test_clip_styles_set_by_embedding_must_be_back_as_they_were(self):
+        for bit, name in ((w.WS_CLIPSIBLINGS, "WS_CLIPSIBLINGS"), (w.WS_CLIPCHILDREN, "WS_CLIPCHILDREN")):
+            different = self.mismatch(style=ORIGINAL.style & ~bit)  # the original had it: it was lost
+            self.assertTrue(any(name in text for text in different), different)
+        no_clip = WindowState(0x77, 0, 0x10CF0000, 0x100, (0, 0, 640, 480), False, False)  # had neither
+        different = self.mismatch(style=no_clip.style | w.WS_CLIPSIBLINGS | w.WS_CLIPCHILDREN, state=no_clip)
+        self.assertEqual(different, ["styles WS_CLIPSIBLINGS/WS_CLIPCHILDREN"])  # left over from embedding
+
+    def test_popup_toolwindow_and_show_state_are_verified(self):
+        self.assertIn("styles WS_POPUP", self.mismatch(style=ORIGINAL.style | w.WS_POPUP))
+        self.assertIn("WS_EX_TOOLWINDOW", self.mismatch(ex_style=ORIGINAL.ex_style | w.WS_EX_TOOLWINDOW))
+        maximized = WindowState(0x77, 0, ORIGINAL.style, 0x100, (0, 0, 640, 480), True, False)
+        self.assertEqual(self.mismatch(state=maximized), ["maximized / minimized state"])  # not maximized again
+        self.assertEqual(self.mismatch(state=maximized, zoomed=True), [])
+        self.assertEqual(self.mismatch(iconic=True), ["maximized / minimized state"])
+
+    def test_closed_window_is_never_reported_as_restored(self):
+        with mock.patch.object(w, "IsWindow", return_value=False):
+            self.assertFalse(embedder.is_restored(ORIGINAL))
+
+
+class PartialRestoreTests(unittest.TestCase):
+    """A rollback that is only partly applied gets one more complete attempt; if it still differs, nothing else (no
+    docking) is tried and the host keeps the window (stranded)."""
+
+    def attempt(self, mismatches, hung=False):
+        fakes = Win32Fakes(self, parent_after=0)
+        with mock.patch.object(w, "SetParent", side_effect=refused(87)), \
+                mock.patch.object(embedder, "restore_mismatch", side_effect=list(mismatches)), \
+                mock.patch.object(w, "IsHungAppWindow", side_effect=[False, hung, hung]), \
+                mock.patch.object(embedder, "dock", return_value=(
+                    embedder.EmbedResult(embedder.EmbedStatus.BLOCKED, "not here"), None)) as dock:
+            result, embedded = embedder.embed_or_dock(TOOL, HOST, 640, 480, True)
+        return result, embedded, fakes.restore, dock
+
+    def test_a_second_attempt_that_completes_the_restore_allows_the_fallback(self):
+        result, _embedded, restore, dock = self.attempt([["styles WS_CLIPSIBLINGS"], []])
+        self.assertEqual(restore.call_count, 2)
+        dock.assert_called_once()  # verified now: docking may be tried
+        self.assertTrue(result.rolled_back)
+
+    def test_restore_that_stays_partial_is_reported_and_left_alone(self):
+        result, embedded, restore, dock = self.attempt([["styles WS_CLIPCHILDREN"], ["styles WS_CLIPCHILDREN"]])
+        self.assertEqual(restore.call_count, 2)
+        dock.assert_not_called()
+        self.assertIsNone(embedded)
+        self.assertFalse(result.rolled_back)
+        self.assertIsNotNone(result.stranded)
+        self.assertIn("WS_CLIPCHILDREN", result.reason)
+
+    def test_a_hung_window_gets_no_second_attempt(self):
+        result, _embedded, restore, dock = self.attempt([["parent window"]], hung=True)
+        self.assertEqual(restore.call_count, 1)  # its first restore may still be pending: never pile up more
+        dock.assert_not_called()
+        self.assertFalse(result.rolled_back)
 
 
 class EscapeTests(unittest.TestCase):
@@ -298,9 +360,13 @@ class ReplacementSearchTests(unittest.TestCase):
         values.update(kw)
         return PlaygroundSession(**values)
 
-    def search(self, windows, created=111.0, session=None, escaped=False, exclude=()):
+    def search(self, windows, created=111.0, session=None, escaped=False, exclude=(), started=None, facts=None):
+        """``started`` / ``facts``: per pid, what process_started / process_facts report (the real process table is
+        never consulted)."""
         windows = list(windows)
-        with mock.patch.object(playground, "process_started", return_value=created), \
+        started_of = (lambda pid: started.get(pid, 0.0)) if started is not None else (lambda pid: created)
+        with mock.patch.object(playground, "process_started", side_effect=started_of), \
+                mock.patch.object(playground, "process_facts", side_effect=lambda pid: (facts or {}).get(pid)), \
                 mock.patch.object(playground, "list_top_level_windows", return_value=windows):
             return find_replacement_window(session or self.session(), TOOL.hwnd, escaped, set(exclude),
                                            threading.Event(), timeout=0.3, poll=0.01)
@@ -347,6 +413,93 @@ class ReplacementSearchTests(unittest.TestCase):
         started = time.monotonic()
         self.search([])
         self.assertLess(time.monotonic() - started, 2.0)
+
+
+class CrossProcessReplacementTests(unittest.TestCase):
+    """Programs that open their new window in another process (Electron-style apps, self-restarting programs): only a
+    process of the same executable tied to the hosted one by the verified process tree may replace it.
+
+    Hosted: pid 4242 (created at 111) of tool.exe, started by pid 100 (created at 50)."""
+
+    EXE = TOOL.exe
+    search = ReplacementSearchTests.search
+
+    def session(self, parent_exe=EXE, **kw):
+        values = dict(id="s", app_id="", title="Tool", exe=self.EXE, pid=TOOL.pid, hwnd=TOOL.hwnd,
+                      process_created=111.0, process_exe=self.EXE, parent_pid=100, parent_created=50.0,
+                      parent_exe=parent_exe, window_class="ToolClass", known_windows={0x10})
+        values.update(kw)
+        return PlaygroundSession(**values)
+
+    def window(self, pid, exe=EXE, hwnd=0x99):
+        return WindowInfo(hwnd, pid, 1, "Tool", "ToolClass", exe)
+
+    def find(self, candidate, facts, hosted_alive=True, parent_alive=True, session=None):
+        started = {pid: fact.created for pid, fact in facts.items()}
+        started.update({TOOL.pid: 111.0 if hosted_alive else 0.0, 100: 50.0 if parent_alive else 0.0})
+        return self.search([candidate], session=session or self.session(), started=started, facts=facts)
+
+    @staticmethod
+    def facts(created, parent, exe=EXE):
+        return playground.ProcessFacts(created, exe, parent)
+
+    def test_new_window_in_a_child_process_is_taken(self):
+        child = self.window(5000)
+        self.assertEqual(self.find(child, {5000: self.facts(150.0, TOOL.pid)}), child)
+
+    def test_program_that_restarted_itself_is_found_after_its_first_process_ended(self):
+        child = self.window(5000)
+        self.assertEqual(self.find(child, {5000: self.facts(150.0, TOOL.pid)}, hosted_alive=False), child)
+
+    def test_grandchild_is_taken_only_through_a_verified_chain(self):
+        grandchild = self.window(6000)
+        chain = {6000: self.facts(160.0, 5001), 5001: self.facts(140.0, TOOL.pid)}
+        self.assertEqual(self.find(grandchild, chain), grandchild)
+        reused = {6000: self.facts(160.0, 5001), 5001: self.facts(170.0, TOOL.pid)}  # 5001 now names a newer process
+        self.assertIsInstance(self.find(grandchild, reused), NoWindow)
+        self.assertIsInstance(self.find(grandchild, {6000: self.facts(160.0, 5001)}), NoWindow)  # 5001 gone
+
+    def test_sibling_counts_only_when_its_parent_is_the_same_program(self):
+        sibling = self.window(5000)
+        facts = {5000: self.facts(150.0, 100)}
+        self.assertEqual(self.find(sibling, facts), sibling)  # e.g. an Electron main process and its window process
+        shell_started = self.session(parent_exe=r"c:\windows\explorer.exe")
+        self.assertIsInstance(self.find(sibling, facts, session=shell_started), NoWindow)  # any app's sibling
+        self.assertIsInstance(self.find(sibling, {5000: self.facts(40.0, 100)}, parent_alive=False), NoWindow)
+
+    def test_parent_process_of_the_same_program_is_taken(self):
+        parent = self.window(100)
+        self.assertEqual(self.find(parent, {100: self.facts(50.0, 1)}), parent)
+        self.assertIsInstance(self.find(parent, {100: self.facts(60.0, 1)}), NoWindow)  # pid 100 was reused
+
+    def test_another_executable_is_never_taken_even_as_a_child(self):
+        other = self.window(5000, exe=r"c:\other\helper.exe")
+        found = self.find(other, {5000: self.facts(150.0, TOOL.pid, exe=r"c:\other\helper.exe")})
+        self.assertIsInstance(found, NoWindow)
+
+    def test_unrelated_process_of_the_same_executable_is_not_taken(self):
+        stranger = self.window(7000)  # e.g. a second copy the user started from the Start menu
+        found = self.find(stranger, {7000: self.facts(150.0, 3000), 3000: self.facts(10.0, 1)})
+        self.assertIsInstance(found, NoWindow)
+        self.assertFalse(found.exited)
+
+    def test_cirana_itself_is_never_part_of_the_chain(self):
+        child = self.window(5000)
+        with mock.patch.object(playground.os, "getpid", return_value=TOOL.pid):  # as if CIRANA had that pid
+            self.assertIsInstance(self.find(child, {5000: self.facts(150.0, TOOL.pid)}), NoWindow)
+
+    def test_related_window_and_same_process_window_together_are_ambiguous(self):
+        windows = [self.window(5000, hwnd=0x98), self.window(TOOL.pid, hwnd=0x99)]
+        started = {TOOL.pid: 111.0, 100: 50.0, 5000: 150.0}
+        found = self.search(windows, session=self.session(), started=started,
+                            facts={5000: self.facts(150.0, TOOL.pid)})
+        self.assertIsInstance(found, NoWindow)
+        self.assertIn("cannot tell", found.reason)
+
+    def test_without_a_known_executable_only_the_same_process_counts(self):
+        child = self.window(5000)
+        found = self.find(child, {5000: self.facts(150.0, TOOL.pid)}, session=self.session(process_exe=""))
+        self.assertIsInstance(found, NoWindow)
 
 
 if __name__ == "__main__":

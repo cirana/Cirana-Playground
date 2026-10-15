@@ -203,12 +203,20 @@ def embed(info: WindowInfo, host_hwnd: int, width: int, height: int, launched_by
         log.warning("Embedding %s (%s) failed: %s", info.exe_name, info.class_name, exc)
         restore_state(state)
         reason = exc.strerror or str(exc)
-        if not w.IsWindow(hwnd) or is_restored(state):  # (a closed window has nothing left to restore)
+        if not w.IsWindow(hwnd):  # a closed window has nothing left to restore
             return EmbedResult(EmbedStatus.FAILED, reason, compat.warnings), None
-        log.warning("%s (%#x) could not be fully restored after the failed embedding", info.exe_name, hwnd)
+        mismatch = restore_mismatch(state)
+        if mismatch and not w.IsHungAppWindow(hwnd):  # one more complete attempt, then it is verified again
+            restore_state(state)
+            mismatch = restore_mismatch(state)
+        if not mismatch:
+            return EmbedResult(EmbedStatus.FAILED, reason, compat.warnings), None
+        log.warning("%s (%#x) could not be fully restored after the failed embedding: %s", info.exe_name, hwnd,
+                    ", ".join(mismatch))
         stranded = EmbeddedWindow(hwnd, host_hwnd, state, info.pid, launched_by_cirana)
-        return EmbedResult(EmbedStatus.FAILED, reason + " CIRANA could not verify that the window is back as it was; "
-                           "it was left alone.", compat.warnings, rolled_back=False, stranded=stranded), None
+        return EmbedResult(EmbedStatus.FAILED, f"{reason} CIRANA could not verify that the window is back as it was "
+                           f"(still different: {', '.join(mismatch)}); nothing else was tried on it.", compat.warnings,
+                           rolled_back=False, stranded=stranded), None
 
     embedded = EmbeddedWindow(hwnd, host_hwnd, state, info.pid, launched_by_cirana)
     return EmbedResult(EmbedStatus.OK, warnings=compat.warnings), embedded
@@ -225,19 +233,44 @@ def _set_long(hwnd: int, index: int, value: int, what: str) -> None:
         raise OSError(error, f"{what} was refused. {w.explain_error(error, higher_rights(pid) if pid else None)}")
 
 
-# What embed() changes on the window (the show state aside): its parent, these style bits and WS_EX_APPWINDOW.
-_CHANGED_STYLES = (_FRAME_STYLES | w.WS_CHILD) & ~(w.WS_MINIMIZE | w.WS_MAXIMIZE)
+# What embed() changes on the window (the show state is compared separately): its parent, these style bits (the
+# frame, WS_CHILD / WS_POPUP, and the WS_CLIPSIBLINGS / WS_CLIPCHILDREN it adds) and WS_EX_APPWINDOW. restore_state
+# writes the captured styles back as they were; measured: Windows keeps them exactly (it adds nothing on the way back).
+_RESTORED_STYLES = (_FRAME_STYLES | w.WS_CHILD | w.WS_CLIPSIBLINGS | w.WS_CLIPCHILDREN) & ~(w.WS_MINIMIZE | w.WS_MAXIMIZE)
+_RESTORED_EX_STYLES = w.WS_EX_APPWINDOW | w.WS_EX_TOOLWINDOW  # both decide its taskbar button / Alt+Tab entry
+_STYLE_NAMES = {
+    w.WS_POPUP: "WS_POPUP", w.WS_CHILD: "WS_CHILD", w.WS_CLIPSIBLINGS: "WS_CLIPSIBLINGS",
+    w.WS_CLIPCHILDREN: "WS_CLIPCHILDREN", w.WS_CAPTION: "WS_CAPTION", w.WS_THICKFRAME: "WS_THICKFRAME",
+    w.WS_SYSMENU: "WS_SYSMENU", w.WS_MINIMIZEBOX: "WS_MINIMIZEBOX", w.WS_MAXIMIZEBOX: "WS_MAXIMIZEBOX",
+}
+
+
+def restore_mismatch(state: WindowState) -> list[str]:
+    """What is still different from the captured state in everything CIRANA changes ([] = verifiably restored): the
+    parent, the styles above, WS_EX_APPWINDOW / WS_EX_TOOLWINDOW and the maximized / minimized state. Only reads
+    (GetParent, GetWindowLongPtr, IsZoomed, IsIconic send nothing), so this is safe on a hung application."""
+    hwnd = state.hwnd
+    if not w.IsWindow(hwnd):
+        return ["the window no longer exists"]
+    different = []
+    if int(w.GetParent(hwnd) or 0) != state.parent:
+        different.append("parent window")
+    style = int(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE)) & 0xFFFFFFFF
+    changed = (style ^ state.style) & _RESTORED_STYLES
+    if changed:
+        names = [name for bit, name in _STYLE_NAMES.items() if changed & bit == bit]
+        different.append("styles " + "/".join(names or [hex(changed)]))
+    ex_changed = ((int(w.GetWindowLongPtrW(hwnd, w.GWL_EXSTYLE)) & 0xFFFFFFFF) ^ state.ex_style) & _RESTORED_EX_STYLES
+    if ex_changed:
+        different.append("WS_EX_APPWINDOW" if ex_changed & w.WS_EX_APPWINDOW else "WS_EX_TOOLWINDOW")
+    if bool(w.IsZoomed(hwnd)) != state.maximized or bool(w.IsIconic(hwnd)) != state.minimized:
+        different.append("maximized / minimized state")
+    return different
 
 
 def is_restored(state: WindowState) -> bool:
-    """True when the window is verifiably back as captured in everything CIRANA changes: its parent, its frame /
-    child styles and WS_EX_APPWINDOW. GetParent / GetWindowLongPtr send nothing, so this is safe on a hung app."""
-    hwnd = state.hwnd
-    if not w.IsWindow(hwnd) or int(w.GetParent(hwnd) or 0) != state.parent:
-        return False
-    style = int(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE)) & 0xFFFFFFFF
-    ex_style = int(w.GetWindowLongPtrW(hwnd, w.GWL_EXSTYLE)) & 0xFFFFFFFF
-    return not (style ^ state.style) & _CHANGED_STYLES and not (ex_style ^ state.ex_style) & w.WS_EX_APPWINDOW
+    """True when the window is verifiably back as captured (see restore_mismatch)."""
+    return not restore_mismatch(state)
 
 
 # -- docked mode ------------------------------------------------------------------------------------------

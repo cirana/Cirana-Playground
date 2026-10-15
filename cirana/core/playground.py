@@ -89,6 +89,10 @@ class PlaygroundSession:
     reconnects: int = 0  # reconnections in a row after window losses (see PlaygroundManager.window_lost)
     # Who the hosted window belongs to, recorded when it was hosted: a replacement window must match all of it.
     process_created: float = 0.0  # creation time of process ``pid`` (0: unknown; a reused pid differs)
+    process_exe: str = ""  # its image path, lower-case ("" unknown: only the same process can then replace it)
+    parent_pid: int = 0  # the process that started it, with its creation time and image path (0 / "": unknown)
+    parent_created: float = 0.0
+    parent_exe: str = ""
     window_class: str = ""
     known_windows: set[int] = field(default_factory=set)  # top-level windows that already existed then
 
@@ -345,37 +349,109 @@ def process_started(pid: int) -> float:
         return 0.0
 
 
+@dataclass(frozen=True)
+class ProcessFacts:
+    created: float
+    exe: str  # lower-case image path ("" when it cannot be read)
+    parent: int  # the pid recorded as its parent when it was started (that process may be gone by now)
+
+
+def process_facts(pid: int) -> ProcessFacts | None:
+    """Creation time, image path and parent pid of a process (None when it is gone or cannot be inspected)."""
+    try:
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            created, parent = proc.create_time(), proc.ppid()
+    except psutil.Error:
+        return None
+    return ProcessFacts(created, w.process_image_path(pid).lower(), parent)
+
+
+def _still_or_was(pid: int, created: float, child_created: float) -> bool:
+    """``pid`` (recorded as the parent of a process started at ``child_created``) is the process created at
+    ``created``: it still runs with that creation time, or it is gone and the child started after it (a pid that
+    named a newer process would have a later creation time while it runs)."""
+    now = process_started(pid)
+    return now == created if now else bool(created) and child_created >= created
+
+
+TREE_DEPTH = 6  # how far up a candidate's parent chain is followed
+
+
+def process_relation(session: PlaygroundSession, pid: int, exe: str) -> str:
+    """How process ``pid`` (image ``exe``) belongs to the hosted window's application; "" when not reliably.
+
+    Some programs open their new window in another process (Electron / Chromium-style apps, programs that restart
+    themselves). Another process only counts when it runs the *same executable* and is tied to the hosted process by
+    the verified process tree (each parent's creation time checked, so a reused pid breaks the chain): its child or
+    grandchild, its parent, or a sibling started by a parent that is the same program too. A sibling started by a
+    shell or by CIRANA (any program's parent) is never enough, nor is the executable alone."""
+    if pid == session.pid:
+        return "the same process" if process_started(pid) == session.process_created else ""
+    if not pid or pid == os.getpid() or not session.process_exe or exe != session.process_exe:
+        return ""
+    facts = process_facts(pid)
+    if facts is None or facts.exe != session.process_exe:
+        return ""
+    if session.parent_pid and pid == session.parent_pid and facts.created == session.parent_created:
+        return "its parent process"
+    if session.parent_pid and facts.parent == session.parent_pid and session.parent_exe == session.process_exe \
+            and _still_or_was(session.parent_pid, session.parent_created, facts.created):
+        return "a sibling process of the same program"
+    child_created, current = facts.created, facts.parent
+    for _ in range(TREE_DEPTH):
+        if not current or current == os.getpid():
+            break
+        if current == session.pid:
+            return "a child process" if _still_or_was(session.pid, session.process_created, child_created) else ""
+        parent = process_facts(current)
+        if parent is None or parent.created > child_created:
+            break  # gone, or the pid names a newer process now: the chain cannot be followed reliably
+        child_created, current = parent.created, parent.parent
+    return ""
+
+
 def find_replacement_window(
     session: PlaygroundSession, old_hwnd: int, escaped: bool, exclude: set[int], cancel: threading.Event,
     timeout: float = RECONNECT_WAIT, poll: float = 0.2,
 ) -> WindowInfo | NoWindow | None:
     """Worker-thread: the window that took the place of a lost hosted window, or why there is none.
 
-    There is no creation time for a window in Win32, so a replacement must match everything else that is known: the
-    same process (pid *and* process creation time), the same window class, a real main window, not hosted already,
-    and new (absent from the top-level windows that existed when the lost one was hosted, which rules out the
-    application's other windows). Exactly one such window must be there on two polls in a row; with more than one,
-    none is taken. ``escaped``: the lost window itself left the host and is the candidate, once it is top-level."""
+    There is no creation time for a window in Win32, so a replacement must match everything else that is known: a
+    process of the same application (the same process, pid *and* creation time, or one tied to it by the verified
+    process tree and the same executable, see process_relation), the same window class, a real main window, not
+    hosted already, and new (absent from the top-level windows that existed when the lost one was hosted, which rules
+    out the application's other windows). Exactly one such window must be there on two polls in a row; with more than
+    one, none is taken. ``escaped``: the lost window itself left the host and is the candidate, once it is top-level.
+    The hosted process may have ended (a program that restarted itself); then only related processes can match."""
     deadline = time.monotonic() + timeout
     pid, seen = session.pid, 0
     while not cancel.is_set():
-        if not session.process_created or process_started(pid) != session.process_created:
-            return NoWindow("Its process has ended.", exited=True)
+        gone = not session.process_created or process_started(pid) != session.process_created
         if escaped:
+            if gone:
+                return NoWindow("Its process has ended.", exited=True)
             if w.IsWindow(old_hwnd) and w.window_pid(old_hwnd)[0] == pid and embedder.is_top_level(old_hwnd) \
                     and is_main_window_candidate(old_hwnd) and old_hwnd not in exclude:
                 return describe_window(old_hwnd)
         else:
-            found = [i for i in list_top_level_windows() if i.pid == pid and i.class_name == session.window_class
+            relation: dict[int, str] = {}  # per process, worked out once per poll
+            found = [i for i in list_top_level_windows() if i.class_name == session.window_class
                      and i.hwnd != old_hwnd and i.hwnd not in session.known_windows and i.hwnd not in exclude]
+            for info in found:
+                if info.pid not in relation:
+                    relation[info.pid] = process_relation(session, info.pid, info.exe)
+            found = [i for i in found if relation[i.pid]]
             if len(found) > 1:
                 return NoWindow(f"It opened {len(found)} new windows of the same kind; CIRANA cannot tell which one "
                                 "replaces the hosted one, so it took none.")
             if found and found[0].hwnd == seen:
+                log.info("Replacement window %#x of %s found in %s (pid %d)", found[0].hwnd, session.title,
+                         relation[found[0].pid], found[0].pid)
                 return found[0]
             seen = found[0].hwnd if found else 0
         if time.monotonic() >= deadline:
-            return NoWindow("")
+            return NoWindow("", exited=gone)
         cancel.wait(poll)
     return None
 
@@ -532,7 +608,8 @@ class PlaygroundManager(QObject):
         if not session.process_created:  # who the window belonged to is unknown: nothing can be verified
             self._end_lost(session, escaped, exited=False)
             return
-        if process_started(session.pid) != session.process_created:
+        if process_started(session.pid) != session.process_created and (escaped or not session.process_exe):
+            # Ended. A program that restarted itself is still looked for below, among the processes tied to it.
             self._end_lost(session, escaped, exited=True)
             return
         if session.reconnects > MAX_RECONNECTS:
@@ -703,6 +780,14 @@ class PlaygroundManager(QObject):
         if result.ok:
             if session.hwnd:  # who the window belongs to, for recognising a replacement (find_replacement_window)
                 session.process_created = process_started(session.pid)
+                facts = process_facts(session.pid)
+                parent = process_facts(facts.parent) if facts and facts.parent else None
+                # The parent only counts while it is the process that started this one (not a newer one, same pid).
+                if parent is not None and facts is not None and parent.created > facts.created:
+                    parent = None
+                session.process_exe = facts.exe if facts else ""
+                session.parent_pid = facts.parent if facts and parent else 0
+                session.parent_created, session.parent_exe = (parent.created, parent.exe) if parent else (0.0, "")
                 session.window_class = w.class_name(session.hwnd)
                 session.known_windows = snapshot_handles()
             self.update_state(session.id, SessionState.EMBEDDED, "")

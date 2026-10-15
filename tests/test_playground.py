@@ -438,6 +438,7 @@ class PlaygroundUiTests(unittest.TestCase):
             mock.patch.object(playground, "windows_of_executable", return_value=[]),
             # the fake pid 4242 may name a real process: never treat it as the hosted application's process
             mock.patch.object(playground, "process_started", return_value=0.0),
+            mock.patch.object(playground, "process_facts", return_value=None),
         ]
         for patch in patches:
             patch.start()
@@ -1052,6 +1053,17 @@ class PlaygroundUiTests(unittest.TestCase):
         search.assert_not_called()
         self.assertEqual(session.state, SessionState.CLOSED)
         self.assertEqual(session.message, "Gone closed its window.")
+
+    def test_program_that_restarted_in_a_new_process_is_looked_for(self):
+        session = self.hosted("Restarter")
+        session.process_exe = r"c:\tools\restarter.exe"  # known: related processes of it may carry its window
+        successor = WindowInfo(0x7a00, 5151, 1, "Fake window", "Cls", session.exe)
+        with mock.patch.object(playground, "process_started", return_value=0.0), \
+                mock.patch.object(playground, "find_replacement_window", return_value=successor) as search:
+            self.lose(session)  # its first process has ended
+            self.assertTrue(self.pump(until=lambda: session.state is SessionState.EMBEDDED))
+        search.assert_called_once()
+        self.assertEqual((session.hwnd, session.pid), (0x7a00, 5151))  # the tab follows the new process
 
     def test_uncertain_replacement_is_not_taken(self):
         session = self.hosted("Twins")
