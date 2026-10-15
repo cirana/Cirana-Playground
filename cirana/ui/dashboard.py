@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 
 from cirana.ui.common import label, make_scroll, section_header
 from cirana.ui.context import AppContext
 from cirana.widgets.app_collection import AppCollection
 from cirana.widgets.flow_layout import FlowLayout
+from cirana.widgets.workspace_card import WorkspaceCard
 
 SECTION_LIMIT = 8
 
@@ -43,33 +44,6 @@ class _CategoryTile(QFrame):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.category_id)
-
-
-class _WorkspaceTile(QFrame):
-    selected = Signal(str)
-    open_requested = Signal(str)
-
-    def __init__(self, workspace_id: str, name: str, count: int, active: bool) -> None:
-        super().__init__()
-        self.workspace_id = workspace_id
-        self.setObjectName("CategoryTile")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(236, 84)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(0)
-        layout.addWidget(label(name + ("  ·  active" if active else ""), "AppName"))
-        layout.addWidget(label(f"{count} app{'s' if count != 1 else ''}", "AppCategory"))
-        layout.addStretch(1)
-        button = QPushButton("Open workspace")
-        button.setObjectName("LaunchButton")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.clicked.connect(lambda: self.open_requested.emit(workspace_id))
-        layout.addWidget(button)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.selected.emit(self.workspace_id)
 
 
 class DashboardView(QWidget):
@@ -121,13 +95,13 @@ class DashboardView(QWidget):
         self.categories_layout = FlowLayout(self.categories_host, spacing=12)
         root.addWidget(self.categories_host)
 
-        root.addWidget(section_header("Workspaces", "Open", lambda: self.navigate.emit("workspaces", None)))
+        root.addWidget(section_header("Workspaces", "Manage", lambda: self.navigate.emit("workspaces", None)))
         self.workspaces_host = QWidget()
         self.workspaces_layout = FlowLayout(self.workspaces_host, spacing=12)
         root.addWidget(self.workspaces_host)
         self.workspaces_empty = label(
-            "Create a workspace to open a group of applications together. Drag cards onto it or use the "
-            "Workspaces page.", "Muted")
+            "Create a workspace to bring up a group of windows together, arranged side by side, in a grid or where "
+            "you left them. Drag cards onto it or use the Workspaces page.", "Muted")
         root.addWidget(self.workspaces_empty)
         root.addStretch(1)
 
@@ -179,14 +153,16 @@ class DashboardView(QWidget):
                 item.widget().deleteLater()
         workspaces = ctx.workspaces.all()
         for workspace in workspaces:
-            tile = _WorkspaceTile(workspace.id, workspace.name, len(workspace.apps), workspace.id == ctx.workspaces.active_id)
-            tile.selected.connect(lambda wid: self.navigate.emit("workspaces", wid))
-            tile.open_requested.connect(self._open_workspace)
-            self.workspaces_layout.addWidget(tile)
+            card = WorkspaceCard(ctx, workspace, workspace.id == ctx.workspaces.active_id, True)
+            card.setFixedWidth(260)
+            card.selected.connect(lambda wid: self.navigate.emit("workspaces", wid))
+            card.activate_requested.connect(self._activate_workspace)
+            self.workspaces_layout.addWidget(card)
         self.workspaces_host.setVisible(bool(workspaces))
         self.workspaces_empty.setVisible(not workspaces)
         self.workspaces_host.updateGeometry()
 
-    def _open_workspace(self, workspace_id: str) -> None:
-        if not self.ctx.launcher.open(workspace_id):
-            self.ctx.actions.message.emit("Another workspace is still opening. Please wait a moment")
+    def _activate_workspace(self, workspace_id: str) -> None:
+        workspace = self.ctx.workspaces.get(workspace_id)
+        if workspace is not None and workspace.apps:
+            self.ctx.wm.activate(workspace_id)

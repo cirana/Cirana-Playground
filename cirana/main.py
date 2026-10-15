@@ -10,22 +10,27 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from cirana.core.application_registry import ApplicationRegistry
-from cirana.core.playground import PlaygroundManager
 from cirana.core.process_tracker import ProcessTracker
 from cirana.core.scan_controller import ScanController
+from cirana.core.workspace_controller import WorkspaceController
 from cirana.core.workspace_launcher import WorkspaceLauncher
 from cirana.core.workspaces import WorkspaceManager
+from cirana.native import win32_api
 from cirana.storage.settings_manager import SettingsManager, setup_logging
 from cirana.ui.app_actions import AppActions
 from cirana.ui.app_icons import AppIconProvider
 from cirana.ui.context import AppContext
 from cirana.ui.main_window import MainWindow
 from cirana.ui.theme import app_font, app_icon, build_stylesheet
+from cirana.wm.controller import WindowController
+from cirana.wm.tracker import WindowTracker
 
 log = logging.getLogger("cirana")
 
 
-def build_app(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, AppContext]:
+def build_app(argv: list[str] | None = None, window_hooks: bool = True,
+              window_backend=None) -> tuple[QApplication, MainWindow, AppContext]:  # noqa: ANN001
+    """``window_hooks`` / ``window_backend``: the tests run the window manager on a simulated desktop."""
     app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("CIRANA")
     app.setWindowIcon(app_icon())
@@ -34,15 +39,16 @@ def build_app(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, 
 
     settings = SettingsManager()
     setup_logging(settings.root)
+    log.info("DPI awareness: %s", win32_api.process_dpi_awareness())
     registry = ApplicationRegistry(settings)
     scanner = ScanController(registry)
     tracker = ProcessTracker()
     actions = AppActions(registry, tracker)
-    playground = PlaygroundManager(registry, settings)
-    actions.playground = playground
-    workspaces = WorkspaceManager(settings, registry)
+    windows = WindowTracker(window_backend, hooks=window_hooks)
+    window_control = WindowController(windows.backend)
+    workspaces = WorkspaceManager(settings, registry, monitors=windows.backend.monitors)
     actions.workspaces = workspaces
-    actions.workspace_id = lambda: workspaces.active_id
+    wm = WorkspaceController(workspaces, registry, windows, window_control, WorkspaceLauncher(registry, windows))
     ctx = AppContext(
         settings=settings,
         registry=registry,
@@ -50,21 +56,22 @@ def build_app(argv: list[str] | None = None) -> tuple[QApplication, MainWindow, 
         tracker=tracker,
         icons=AppIconProvider(settings.icon_cache_dir),
         actions=actions,
-        playground=playground,
         workspaces=workspaces,
-        launcher=WorkspaceLauncher(registry, workspaces, playground),
+        windows=windows,
+        window_control=window_control,
+        wm=wm,
     )
     window = MainWindow(ctx)
     tracker.set_apps(registry.all_apps())
     registry.changed.connect(lambda: tracker.set_apps(registry.all_apps()))
-    app.aboutToQuit.connect(window.shutdown_playground)  # first: hosted windows go back to Windows before teardown
+    app.aboutToQuit.connect(windows.stop)
     app.aboutToQuit.connect(tracker.shutdown)
     app.aboutToQuit.connect(scanner.shutdown)
     return app, window, ctx
 
 
 def _install_safety_nets(app: QApplication) -> None:
-    """Make sure hosted windows are handed back even on Ctrl+C, and that unexpected errors reach the log."""
+    """Quit cleanly on Ctrl+C in a console run, and make sure unexpected errors reach the log."""
     previous = sys.excepthook
 
     def hook(kind, value, trace):  # noqa: ANN001
@@ -72,7 +79,7 @@ def _install_safety_nets(app: QApplication) -> None:
         previous(kind, value, trace)
 
     sys.excepthook = hook
-    signal.signal(signal.SIGINT, lambda *_: app.quit())  # quit() runs aboutToQuit -> hosted windows are restored
+    signal.signal(signal.SIGINT, lambda *_: app.quit())  # quit() runs aboutToQuit -> the hook threads stop
     keepalive = QTimer(app)  # Python only runs signal handlers while the interpreter is active
     keepalive.setInterval(300)
     keepalive.timeout.connect(lambda: None)
@@ -94,10 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     tracker, settings, registry = ctx.tracker, ctx.settings, ctx.registry
     tracker.start()
+    ctx.windows.start()
     # First run (empty cache) always scans; afterwards the cached list is shown instantly.
     if settings.get("scan_on_startup") or not registry.scanned_at:
         ctx.scanner.start()
-    QTimer.singleShot(600, window.check_orphans)
+    QTimer.singleShot(600, window.check_legacy_session)
     log.info("CIRANA started with %d cached applications", len(registry.all_apps()))
     return app.exec()
 

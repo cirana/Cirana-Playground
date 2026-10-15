@@ -1,11 +1,12 @@
-# CIRANA — Desktop Playground
+# CIRANA — application launcher and workspace window manager
 
-A Windows desktop environment that discovers your installed applications, organizes them, and launches them
-instantly. Python 3.11+, PySide6, pywin32, psutil. Fully offline: no server, database, telemetry or accounts.
-All data stays in `%LOCALAPPDATA%\CIRANA\`.
+A Windows desktop tool that discovers your installed applications, launches them, and arranges their **real
+windows** into workspaces: groups such as "Development" (VS Code, Brave, PowerShell, Discord) that one click opens,
+places side by side or in a grid, and brings to the front. Python 3.11+, PySide6, pywin32, psutil. Fully offline:
+no server, database, telemetry or accounts. All data stays in `%LOCALAPPDATA%\CIRANA\`.
 
-**Status: Phases 1-3 complete - discovery and launching, the native Playground (applications in tabs), and
-Workspaces (one-click groups with saved sessions). Phase 4 (polish) is not started.**
+CIRANA never embeds, re-parents or restyles another application's window. Every application keeps its own title
+bar, taskbar button and Alt+Tab entry, and keeps running untouched when CIRANA closes or crashes.
 
 ## Install and run
 
@@ -15,191 +16,191 @@ py -3.12 -m venv .venv                       # any Python 3.11+; `py -0p` lists 
 .\.venv\Scripts\python.exe -m cirana
 ```
 
-Startup command: `python -m cirana` from the project folder, using the interpreter that has the requirements
-installed (with several Python versions installed, call the venv's `python.exe` explicitly as above).
-
 ## Tests
 
 ```powershell
 python -m unittest discover -s tests -t .
+$env:CIRANA_LIVE = "1"; python -m unittest tests.test_wm_live    # optional: real windows on the desktop
 ```
 
-Offscreen UI tests (a fake Qt platform with every Win32 call mocked) cover the pages, the Playground tab logic,
-workspaces, drag and drop and the crash-recovery logic. The **live** tests (`tests/test_playground_live.py`,
-`tests/test_native_embedding.py`) drive real applications - Character Map, Remote Desktop, Notepad, and a
-purpose-built Win32 window that stops responding on demand (`tests/hang_window_helper.py`) - and need an
-interactive desktop session; they open real windows for a couple of minutes and close them again (politely, with
-`WM_CLOSE`). One of them kills a hosting CIRANA process on purpose to prove the crash-recovery path.
+The regular suite never touches a real window: the window manager runs against a simulated desktop
+(`tests/fake_desktop.py`: monitors with different DPI and work areas, minimum sizes, elevated / hung / closed
+windows, recycled handles, terminals hosting consoles). It covers the inventory and its threads, identity and match
+rules, the application-window filter, layouts, monitor fallback, placement verification, refusals, workspace
+activation, concurrent and cancelled launches, ambiguous windows, rediscovery after a restart, the version 1 →
+2 data migration, the legacy clean-up, the pages and drag and drop. `tests/test_forbidden_apis.py` fails if
+`SetParent`, `SetWindowLong*`, `AttachThreadInput`, `SendInput`, code injection, taskbar-button hiding or process
+termination (outside the legacy clean-up) ever appear in the code.
 
-**Not covered by automated tests:** real mouse drag and drop. The environment the tests were developed in refuses
-synthetic input (`SetCursorPos`/`SendInput` fail with access denied) and the offscreen Qt platform cannot run a drag,
-so drops are tested by delivering the drag/drop events directly to the widgets, and the drag-threshold logic by
-synthetic mouse events. Qt's real `QDrag` / OLE drag loop was not driven by a test - try it by hand.
+The **live** tests (opt-in) start a real Win32 window in another process (`tests/hang_window_helper.py`) and check on
+the real desktop that the tracker sees it, that it is moved and sized exactly with its styles, owner and parent
+unchanged, that a window that stops responding is reported in under a second instead of freezing CIRANA, and that a
+workspace starts a real program, finds its window through the process tree, arranges and raises it.
 
-## What works (Phase 1)
+**Not covered by automated tests:** real mouse drag and drop (synthetic input is refused in the development
+environment; drops are tested by delivering the events to the widgets) and the specific applications named in the
+goals (Brave, Discord, Armoury Crate, PowerShell, VS Code), which were not installed / driven during the tests: their
+behaviour is covered by the generic mechanisms below (process tree, console hosts, packages, learned programs).
 
-| Area | Behavior |
-|---|---|
-| Discovery | Start Menu shortcuts (user + system), packaged apps via `Get-StartApps`, `App Paths` registrations. No disk-wide scan. Runs on a worker thread; cached in `applications.json`; manual refresh. |
-| Launch types | Executable, Windows shortcut, AppUserModelID, custom command (separate code paths, never a shell). |
-| Dedup | By normalized name; shortcut beats AUMID, user scope beats system scope. Ids are derived from the name so favorites survive a change of launch method. |
-| Categories | Rule-based (known executables, then keywords incl. the English package name of packaged apps and common Turkish Windows names) behind a `Classifier` protocol, so a local model can be plugged in later. On the development machine (Turkish Windows) 20 of 227 apps (9 %) end up in "Other", down from 53 % with English-only rules. Rename/add/delete categories, per-app category, hide, favorite. |
-| User data | Overrides live in separate files from discovered data, so a rescan never loses manual changes (including for apps that temporarily vanish). |
-| UI | Collapsible sidebar, top bar (search, workspace pill, quick launch, grid/list toggle, settings), dashboard (running, favorites, recents, categories), Applications, Favorites, Settings. Ctrl+K search, Ctrl+B sidebar, Ctrl+1…6 pages. |
-| Icons | Shell icons (up to 256 px, also for packaged apps), cached on disk, loaded lazily in time-boxed batches; letter tile fallback. |
-| Running apps | psutil poll every 5 s on a worker thread, paused while minimized. Only apps with a known exe path can be detected. CIRANA's own process is excluded, and apps that share an executable or are launched with arguments (Chrome PWAs, pydoc, ...) are never reported as running because they cannot be told apart. Packaged apps cannot be detected. |
-| Storage | Versioned JSON, atomic temp-file + `os.replace` writes, `.bak` backups, corrupt files quarantined as `*.corrupt-<ts>`, defaults regenerated. |
+## Architecture
 
-Files: `config.json`, `applications.json` (discovered), `categories.json`, `favorites.json`
-(favorites + recents), `overrides.json` (hidden, custom apps, launch modes), `workspaces.json` (workspaces, their applications, modes and saved sessions), `playground_session.json` (windows currently hosted, for crash recovery),
-`cache/icons/`, `logs/cirana.log`.
-
-## Playground (Phase 2)
-
-Sidebar > Playground. Open an application with **Open application**, the **+** button, an application's context
-menu (*Open in a Playground tab*), or by setting an application's *Default launch mode* to Playground tab.
-**Running window...** moves a window that is already open into a tab.
-
-| Behavior | Detail |
-|---|---|
-| Layout | With tabs open the page is one 42 px strip (tabs, status line, search, workspace switch, Detach, Close application, full-window toggle) above an edge-to-edge host; the top bar is hidden on this page. Messages appear in the strip, whose height is fixed, so they never resize the hosted window. Embedding warnings sit behind a warning icon instead of a permanent banner. **Full-window mode** (strip button, `F11`, or double-click a tab) also hides the sidebar; it ends by itself when the last tab closes. |
-| Tabs | Draggable (reorder), closable, middle-click closes, per-tab icon, right-click menu, `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab`. Switching tabs shows/hides the hosted windows; they keep running. Keyboard shortcuts only work while CIRANA itself (not the hosted app) has focus. |
-| Sizing | The hosted window fills the tab and follows window resizes and DPI/monitor changes (device pixels). Resizes are posted asynchronously (`SWP_ASYNCWINDOWPOS`), so a busy application cannot block CIRANA. |
-| Closing a tab | **Detaches** the window (original frame, style, position, maximized state restored) and leaves the application running. It never closes the application. |
-| Detach / Re-attach | Toolbar button. A detached tab stays and can re-attach the same window. |
-| Close application... | Only for applications CIRANA started itself; asks for confirmation, then sends a polite `WM_CLOSE` (the app may prompt to save). Nothing is ever force-killed. |
-| CIRANA exits | Every hosted window is detached first (`closeEvent`, `aboutToQuit`, Ctrl+C in a console run). |
-| Docked apps | Store / UWP / WinUI packages (Notepad, Calculator, Paint, Teams, Outlook, Settings...), console windows, Windows Terminal and Explorer crash or break when re-parented, and Chromium browsers (Chrome, Edge, Brave) lose their address bar once re-parented (Chromium only routes typing to it while its window is Windows' active window, which a child window can never become again), so they are **docked** instead: the window stays an ordinary top-level window and CIRANA keeps its visible frame exactly on the tab (follows moves, resizes and maximize; snaps back if dragged), raises it over CIRANA while the tab shows, puts it behind CIRANA for other tabs/pages/the search overlay, and minimizes it with CIRANA. Only position, size and show state are changed, always with posted / async calls (`SWP_ASYNCWINDOWPOS`, `ShowWindowAsync`); owner, parent and styles are never touched, and a handle is only moved while it still belongs to the same process. A docked app keeps its own title bar, taskbar button and Alt+Tab entry, survives a CIRANA crash with its window intact (so it is not recorded for crash recovery), and is not re-ordered while one of CIRANA's own menus or dialogs is open. Packaged apps launched by AUMID are found by their package folder (`Name_..._PublisherId`, including the CoreWindow inside a UWP frame), then by window title; single-instance apps (Settings) fall back to their existing window after 4 s. |
-| Unsupported apps | Opened as a normal window, untouched: scripts, unknown executables and shell items without a package (Control Panel, MMC consoles) are refused **before** launch; elevated windows are refused when they appear. Start-menu entries whose AUMID is just a program path (Character Map, msinfo32...) are treated as the classic programs they are. The tab explains why. |
-| Duplicates | Opening an application that already has a tab switches to it. *Open another instance* in the tab menu starts a second one on purpose. |
-| Lifecycle | The hosted window is watched twice a second with calls that send no messages (`IsWindow`, `GetParent`, `IsHungAppWindow`). Closed windows and windows that re-parent themselves away are shown on the tab. **A non-responding application is hidden behind a status panel** (measured: *showing* a host whose child is hung blocks the UI thread until the app recovers, hiding does not), comes back by itself when it recovers, and can be detached at any time; a detach that Windows cannot complete yet finishes on a helper thread, and the tab's host is kept alive until it has. |
-| Focus | Clicking a tab, moving the pointer into the hosted window (or clicking it), or re-activating CIRANA gives keyboard focus back to the hosted window. Focus moves when the pointer *enters* the app, before the click: handing it over after the click made browsers restore their previous focus (the page) over the field just clicked (the address bar). A click inside the hosted window never reaches Qt, so a 50 ms check (only message-free calls: `GetForegroundWindow`, `GetAsyncKeyState`, `GetCursorPos`, `GetFocus`) notices it. Browsers (Chromium, Firefox) also need to believe their window is *active* before they accept typing, and a child window never receives `WM_ACTIVATE` again, so CIRANA posts `WM_NCACTIVATE`/`WM_ACTIVATE` to the hosted window when it gains or loses the foreground (the app's own menus and popups count as staying inside it). Qt shortcuts do not fire while the hosted application has focus. |
-| Overlays | A native child window always paints above Qt widgets, so hosted windows are hidden while the search overlay is open; messages are shown in the strip's status line instead of a floating toast. |
-| Crash recovery | While windows are hosted, `playground_session.json` records them (pid, creation time, host pid). If CIRANA is killed, the apps survive without a window (measured). On the next start CIRANA lists them (only if still running, same creation time, no window, host gone) and the user may end selected ones after two explicit confirmations. Nothing is ended automatically. |
-
-### Notepad (the requested first test)
-
-Windows 11 Notepad is a packaged WinUI 3 app (`System32\notepad.exe` is only a stub that starts the Store package).
-Re-parenting it crashes it about two seconds later, so CIRANA never re-parents it (verified live: the window stays
-alive, untouched, top-level); it is **docked** over its tab instead (see Docked apps; docking is not live-verified yet). The real embedding proofs are Character Map and
-Remote Desktop (live-tested in tabs, switching, detach/re-attach, tab closing, resize, shutdown restore) and 7-Zip
-(PoC). A classic Win32 editor would work the same way.
-
-## Workspaces (Phase 3)
-
-Sidebar > Workspaces (or the workspace pill in the top bar).
-
-| Feature | Detail |
-|---|---|
-| Manage | Create, rename (unique names), delete (the applications and anything running are untouched). |
-| Fill | Drag an application card onto a workspace - onto the page, onto a list entry, or onto the floating *Drop on a workspace* strip that appears at the bottom of any page while dragging. Also *Add applications...* and the context menu *Add to workspace*. Duplicates are ignored. |
-| Per-application mode | *Playground tab* or *Own window*, stored per workspace entry. New entries start from the application's *Default launch mode* (default: own window - hosting is opt-in). Applications that cannot be hosted always open in their own window. |
-| One-click open | *Open workspace* (also on the Home dashboard): makes it active, opens its applications one after another, reports a summary. Failures and missing applications never stop the rest. |
-| No duplicates | An application that already has a tab is just activated; a running window of a tab-mode application is adopted into a tab instead of starting another copy; a running normal window is brought to the front. |
-| Switching | The active workspace owns its tabs. Switching hides the other workspace's tabs (applications keep running inside their hidden hosts) and shows the new one's. |
-| Sessions | *Save session* stores, per workspace: the open tabs in order, the active tab, window positions of the workspace's running normal windows, and adds open applications that were not listed yet. Opening the workspace re-applies tab order and active tab; positions are applied to windows CIRANA starts (never moved on a window that was already open). |
-| Storage | Everything is in `workspaces.json` (versioned, atomic writes, `.bak`, corrupt-file quarantine); damaged entries are dropped individually. |
-
-## Native embedding proof of concept
-
-```powershell
-python -m cirana.native.poc_embed                       # interactive
-python -m cirana.native.poc_embed --selftest charmap    # scripted checks
-python -m cirana.native.poc_embed --selftest 7zip --screenshot out.png
+```
+cirana/wm/                         the window manager (no Qt widgets)
+  identity.py    TrackedWindow (hwnd + pid + process creation time + exe + AUMID + class), MatchRule
+  filters.py     which top-level windows are application windows (taskbar / Alt+Tab rules, shell surfaces)
+  backend.py     every Win32 call, behind one object (tests substitute tests/fake_desktop.py)
+  tracker.py     WindowTracker: WinEvent hook thread + probe thread + WindowInventory (GUI-thread signals)
+  monitors.py    monitors, work areas, DPI; finding a saved monitor again
+  layout.py      LayoutSpec and pure layout geometry (side by side, main + side, grid, saved positions)
+  controller.py  WindowController: place / restore / minimize / maximize / raise, verified, per-window results
+cirana/core/
+  workspaces.py           workspace model v2, storage, v1 migration (WorkspaceManager)
+  workspace_controller.py runtime: entry ↔ window bindings, activation, layouts, saved positions
+  workspace_launcher.py   starts missing applications and attributes their new windows
+  legacy_recovery.py      one-time clean-up after the old embedding versions
+cirana/ui/                pages: Home, Applications, Workspaces, Windows, Favorites, Settings
+cirana/widgets/           workspace_card, layout_preview, app cards, drag and drop payloads
 ```
 
-Mechanism: the foreign top-level window is turned into a `WS_CHILD` (frame styles removed) and re-parented with
-`SetParent` onto the HWND of a native Qt widget (`cirana/widgets/native_host.py`). Original parent, style,
-extended style, placement and maximized state are captured and restored on detach. Closing the host detaches
-first. CIRANA never terminates a process; "close application" is a polite `WM_CLOSE`, only for processes CIRANA
-started. All Win32 calls have explicit 64-bit-safe signatures (`cirana/native/win32_api.py`).
+### WindowTracker and WindowIdentity (phase 1)
 
-### Tested applications (this machine: Windows 11 26100, Python 3.12, PySide6 6.12, 125 % display scaling)
+* **Events.** A dedicated thread installs `SetWinEventHook` hooks with `WINEVENT_OUTOFCONTEXT |
+  WINEVENT_SKIPOWNPROCESS` (delivered to CIRANA's own message loop; nothing is loaded into other processes) for
+  create / destroy / show / hide, location and name changes, cloak / uncloak (UWP), minimize start / end, move-size end
+  and foreground changes. The callback only notes the handle (child-window events are discarded cheaply).
+* **Probing.** A second thread coalesces the notes (a dragged window reports dozens of moves a second), describes the
+  windows and every 3 s re-enumerates everything with `EnumWindows`, which catches missed events. Results reach the
+  GUI thread through a queued signal; the inventory emits `window_added / window_changed / window_removed /
+  foreground_changed`. Nothing on the GUI thread waits for another application.
+* **Identity.** A window is (HWND, pid, process creation time). Reading a window opens its process once with limited
+  rights (`GetProcessTimes`, `QueryFullProcessImageNameW`, `GetApplicationUserModelId`). A recycled handle or pid gives
+  a different key, so it is reported as the old window removed and a new one added, and the controller refuses to
+  touch a handle whose owner changed (`still_same`). UWP windows (`ApplicationFrameWindow` of
+  ApplicationFrameHost.exe) are identified by their `CoreWindow` child's process and AppUserModelID.
+* **Filter.** Visible, not cloaked, not CIRANA, not a child, not a shell surface (desktop, taskbars, Start / Search /
+  notification hosts, menus, tooltips), not a tool or no-activate popup, owned windows only with `WS_EX_APPWINDOW` or a
+  hidden owner (Delphi-style main windows), untitled popups only with a frame, and a real size.
 
-| Application | Result |
-|---|---|
-| Character Map (`charmap.exe`, classic Win32 dialog) | **Works.** Embeds, fills host, follows host resizing (fixed dialog does not re-layout), detach restores original style exactly, app keeps running. Screen capture verified. Repeated runs pass. |
-| 7-Zip File Manager (`7zFM.exe`) | **Works.** Same checks pass; the UI re-lays out when the host resizes. CIRANA warns about a DPI-awareness mismatch. Screen capture verified. |
-| Remote Desktop Connection (`mstsc.exe`) | **Works** in the PoC and in live Playground tabs (embed, switch, resize, detach, adopt a running window, restore). Not used interactively beyond that. |
-| Windows 11 Notepad 11.2607 (Store/WinUI 3) | **Does not work: crashes.** Embedding "succeeds", then Notepad terminates ~2 s later (`Application Error`, `CoreMessagingXP.dll`, `0xc000027b`). CIRANA now refuses all packaged apps (`\WindowsApps\` image path) before touching them. Notepad is hosted as an external window. |
-| Calculator (UWP) | **Refused** by the `ApplicationFrameWindow` class check (the refusal was exercised; embedding was not attempted). |
-| Anything else (VS Code, Chrome, Discord, games, Explorer, elevated apps…) | **Untested.** Chromium/Electron, SDL and Unity/Unreal windows are flagged with warnings; elevated apps, console windows, Explorer and the taskbar are refused. |
+### WindowController and LayoutEngine (phase 2)
 
-What the automated checks do **not** prove: typing/mouse input into an embedded app, popups/dialogs/menus of
-embedded apps, multi-monitor DPI changes, or behavior over long sessions. Treat embedding as experimental.
+* Moves use `SetWindowPos` with `SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER` and show states use
+  `ShowWindowAsync`: requests are posted to the window's own thread, so a hung application cannot block CIRANA.
+  Before touching a window the controller checks that the handle still belongs to the same process, that Windows
+  will allow it (integrity level: an elevated application such as Armoury Crate is reported, not attacked) and that it
+  is responding.
+* **Verification.** After a short settle time each window is read back. Results per window: placed, *constrained*
+  (the application kept a minimum or fixed size: reported, never fought), denied (with the reason), hung, gone, or
+  failed. One window's problem never stops the others.
+* Targets describe the **visible frame** (`DWMWA_EXTENDED_FRAME_BOUNDS`); the invisible resize borders are added
+  back, so gaps between windows are even. Minimized and maximized windows are restored first (`GetWindowPlacement`
+  tells whether a minimized one would come back maximized). Moving to a monitor with another scale is followed by the
+  same request again, because per-monitor aware applications resize themselves after the move (`WM_DPICHANGED`).
+* **Layouts** (pure functions, also used by the preview): side by side (optional weights), main + side panel (main
+  width 20–80 %), grid 2×2 and dynamic grid (as square as possible, last row stretched), and saved positions.
+  Gaps are logical pixels scaled by the monitor's DPI. Coordinates are physical pixels from `EnumDisplayMonitors` /
+  `GetMonitorInfoW` work areas (CIRANA runs per-monitor DPI aware, logged at start).
+* **Monitors.** A layout remembers its monitor as {device, rectangle, primary}; when it is gone, the same output, then
+  the same geometry, then the primary monitor is used. Saved positions are fractions of a work area, so they survive
+  resolution changes; rectangles are always clamped into a work area.
+* **Never automatic.** Layouts are applied only when the user activates a workspace or presses *Apply layout*. A
+  window the user moves afterwards stays where it was put; CIRANA never snaps it back.
 
-### Embedding hazards (read before building on this)
+### WorkspaceController and WorkspaceLauncher (phase 3)
 
-- **If CIRANA dies hard, the embedded app is orphaned without a window.** Measured: embed Character Map, then
-  `kill` the host process. The `charmap.exe` process kept running but its window was destroyed with the host
-  window (no visible window to recover). A normal close detaches first and is safe; a crash or Task Manager
-  kill is not. Unsaved work in an embedded app can be lost this way. The Playground now records hosted pids and
-  reports/cleans up such orphans on the next start (see Playground > Crash recovery). A watchdog that detaches
-  windows when CIRANA disappears cannot help: the window is already destroyed with the host.
-- **Shared input queues (documented Windows behavior, not tested here).** Re-parenting a window across processes
-  attaches both threads' input queues, so a hung embedded application can stall CIRANA's UI and vice versa.
-  The Playground therefore checks `IsHungAppWindow`, never calls message-sending APIs on the UI thread for
-  hosted windows (posted resizes, guarded focus) and restores hung windows on a helper thread with a timeout.
-- Applications can re-parent themselves away; the host notices (`escaped`) and stops managing the window.
-- A window must be stable for 0.5 s before embedding; elevated, packaged, console, Explorer and taskbar
-  windows are refused up front.
+* An entry is an application from the catalog or a window picked from the open windows (several windows of one
+  program are separate entries). It stores a match rule (executable, AppUserModelID, optional class / title, programs
+  learned while launching), whether to start it when missing, and the title of the window last bound to it.
+  **No HWND or PID is ever stored.**
+* **Binding.** At runtime each entry is bound to a window key. One fitting window is bound by itself; with several
+  (two Brave windows) the one whose title matches the remembered title is taken, otherwise the user chooses (a
+  dialog during activation, or *Choose window* on the row). After a CIRANA restart the bindings are rebuilt the
+  same way from the windows that are still open.
+* **Activate** = make it the active workspace, reuse every open window (nothing is restarted), start the missing
+  applications, arrange the group in its layout, raise it (first entry on top, with the focus). Other workspaces'
+  windows are not hidden, minimized or closed. *Close workspace* only stops managing: every application keeps running.
+* **Launching.** Several applications start at once. A new window is attributed to the launch whose process tree
+  shows it (launchers and stubs such as Discord's `Update.exe` start the real program as a child; shortcuts are
+  started with `ShellExecuteEx` so their process is known), then to the launch whose tree it hosts (a terminal that
+  owns the console of the shell it shows: PowerShell inside Windows Terminal), then by match rule (packaged apps,
+  single-instance programs). With several candidates the earliest launch wins; each window goes to one launch only.
+  A program that hands the request to a running copy and exits is finished as "handed over" and the existing window
+  is used (or offered). When nothing is recognised at all (a program already running in the tray that answers
+  through another process), *Choose window* on the row lists every open window. What was learned (the terminal,
+  `Discord.exe`, the window chosen by hand) is stored in the rule, so the window is recognised after restarts. Activating again while applications are still starting starts nothing twice;
+  closing the workspace cancels the session and its late launch results and windows are dropped (generation token).
+  No window after 30 s (60 s while the started process runs): reported, the process is left alone.
 
-Notes from the work: Windows 11's Notepad launcher process exits immediately and the real window belongs to a
-different pid, so windows are found by diffing top-level windows (and matching the executable name), not by the
-launched pid. A found window must also stay stable for 0.5 s before embedding, because an early attempt hit
-`ERROR_INVALID_WINDOW_HANDLE` on an app that rebuilt its window while starting.
+### Interface (phase 4)
+
+* **Home:** workspace cards with the applications' icons, a dot per open window, "n of m open" and *Activate*.
+* **Workspaces:** card list (drop application cards on a card to add them), and for the selected workspace:
+  *Activate*, *Apply layout*, *Bring to front*, a ⋯ menu (save current positions, minimize its windows, close the
+  workspace, rename, delete), the layout picker (layout, monitor, gap, main width) with a live preview drawn from the
+  same geometry, and one row per window with its state (Open, Starting…, Choose a window, Starts on activate, Not open,
+  Not available), the bound window's title, the last problem (e.g. "runs with higher rights"), *Start* checkbox,
+  *Choose window*, *Bring to front* and remove. Rows reorder by drag and drop (their place in tiled layouts),
+  application cards dropped on a row are inserted there, a row dragged onto the area below is removed. *Add
+  applications…* (catalog) and *Add open windows…* (a picker that follows windows as they open and close).
+* **Windows:** every open application window, live, with bring to front, minimize, maximize / restore, and "add to
+  a workspace"; it shows which workspaces a window belongs to and, with several monitors, which monitor it is on.
+* The top bar's workspace pill activates a workspace, raises or closes the active one.
+
+### Data (phase 5)
+
+Files: `config.json`, `applications.json` (discovered), `categories.json`, `favorites.json` (favorites + recents),
+`overrides.json` (hidden, custom apps; the old `launch_modes` key is kept but no longer used), `workspaces.json`
+(version 2: workspaces, entries, rules, layouts), `cache/icons/`, `logs/cirana.log`. Versioned JSON, atomic writes,
+`.bak` backups, corrupt files quarantined, damaged records dropped one by one.
+
+* **Version 1 → 2.** The Playground-era file is migrated on first load: the per-application "tab / own window" mode
+  is dropped, the saved tab order becomes the entry order, saved window rectangles become saved positions relative
+  to the monitor they were on (rectangles on no monitor are dropped; if monitors cannot be read the rectangles are
+  kept for the next start), each workspace is migrated on its own, and the original is kept as
+  `workspaces.v1.json`.
+* **Old crash-recovery file.** `playground_session.json` from the embedding versions is read once at start: windows
+  whose taskbar button the old version had hidden get it back (only if the handle still belongs to the same process);
+  applications that lost their window with the old CIRANA are listed and can be ended only after the user ticks them
+  and confirms twice. The file is then removed (kept while the CIRANA that wrote it still runs).
+
+## Removed
+
+The window-embedding architecture is gone: `core/playground.py` (sessions, window search, reconnecting),
+`ui/playground_view.py` (tabs, full-window mode, focus hand-over), `widgets/native_host.py` and
+`widgets/session_page.py` (native child hosts), `native/window_embedder.py` (`SetParent`, style changes, docking),
+`native/window_restorer.py` (style / parent restore), `native/taskbar.py` (hiding taskbar buttons),
+`native/window_discovery.py` (replaced by `cirana/wm`), `native/poc_embed.py`, `core/orphans.py` (crash recovery
+for embedded windows; the one-time part lives in `core/legacy_recovery.py`), the Playground page and its launch
+modes, and the `SetParent` / `SetWindowLongPtr` bindings. With nothing embedded there is nothing to hand back on exit
+and nothing to recover after a crash.
 
 ## Known limitations
 
-- **Hosting foreign windows is inherently fragile.** Only Character Map, Remote Desktop and 7-Zip were verified
-  end to end. Chromium/Electron apps (Chrome, VS Code, Discord...), SDL and Unity/Unreal windows are allowed with a
-  warning but are untested; use *Detach* if one misbehaves. Menus, popups, dialogs, drag and drop and text input
-  inside hosted applications are not covered by automated tests.
-- If CIRANA is **killed hard** (Task Manager, crash), hosted applications lose their window (they keep running).
-  CIRANA reports them at the next start; unsaved work in them cannot be recovered.
-- A hosted application shares an input queue with CIRANA (Windows attaches both threads). A hang is only noticed
-  after Windows declares the window not responding (about 5 s); until then, showing/hiding that window can block
-  CIRANA for those seconds. After that CIRANA hides the window and stays responsive (live-tested).
-- Elevated (administrator) applications cannot be hosted by a normal CIRANA (Windows UIPI). Packaged apps cannot be
-  hosted at all. Console programs run in their own console window.
-- Windows decides which window an application shows; apps that reuse an existing window (single-instance apps,
-  launcher stubs) are only hosted when a matching window appears within 15 s - otherwise they stay normal windows.
-  Windows are matched by executable path or file name, so two different programs with the same file name could be confused.
-- Window positions are saved only for ordinary windows CIRANA can find by executable name (first match). Hosted
-  tabs have no position; their order and active tab are saved.
-- Only one workspace opens at a time. Hosted tabs of an inactive workspace are hidden, not suspended.
-- AUMID launches go through `explorer.exe shell:AppsFolder\...`, so there is no process handle and packaged apps
-  are not shown as "running".
-- Discovery names come from shortcut names; localized Windows tools keep their localized names. Categorization is
-  heuristic and tuned on one machine - recategorize any app from its context menu.
-- Custom commands, `.bat`/`.cmd` and console programs start in their own console window (`CREATE_NEW_CONSOLE`).
-- Frameless chrome uses the native title bar tinted via DWM (Windows 11); on older Windows it is the default frame.
-- Single-instance enforcement is not implemented (a second CIRANA works, and does not mistake the first one's hosted
-  windows for orphans).
+* Windows (UIPI) does not let a normal-rights program move an elevated application's window; CIRANA reports it.
+  Run CIRANA elevated only if you need to arrange elevated windows.
+* Matching is by program, package and learned programs; two different programs with the same file name are
+  treated alike, and windows of a generic host (`javaw.exe`, `python.exe`) need a choice when several are open.
+* Applications that restore their own window position after starting (some browsers, Electron apps) may move after
+  CIRANA placed them; *Apply layout* arranges them again.
+* Windows on other virtual desktops are cloaked and therefore not listed.
+* Discovery names come from shortcut names; categorization is heuristic.
 
 ## Build an EXE
 
 ```powershell
 pip install pyinstaller
 pyinstaller cirana.spec --noconfirm
-# output: dist\CIRANA\CIRANA.exe  (one-folder build, ~125 MB)
+# output: dist\CIRANA\CIRANA.exe  (one-folder build)
 ```
 
-The build was verified: the packaged EXE starts, scans (COM + PowerShell) and caches 227 applications.
+## Application catalog (unchanged)
 
-## Layout
-
-```
-cirana/
-  main.py  paths.py
-  core/      models, application_scanner, application_launcher, application_registry, category_engine,
-             process_tracker, scan_controller, search, background, playground, orphans,
-             workspaces, workspace_launcher
-  native/    win32_api, window_discovery, window_embedder, window_restorer, shell_icons, poc_embed
-  storage/   json_store, settings_manager
-  ui/        main_window, sidebar, topbar, dashboard, applications_view, settings_view, search_overlay,
-             playground_view, workspace_view, dialogs, ...
-  widgets/   app_card, app_collection, flow_layout, native_host, session_page, workspace_drop_bar, dnd
-  assets/    themes/dark.qss, icons/
-tests/
-```
+| Area | Behavior |
+|---|---|
+| Discovery | Start Menu shortcuts (user + system), packaged apps via `Get-StartApps`, `App Paths` registrations. No disk-wide scan. Runs on a worker thread; cached in `applications.json`; manual refresh. |
+| Launch types | Executable, Windows shortcut (`ShellExecuteEx`, so the started process is known), AppUserModelID, custom command (separate code paths, never a shell). |
+| Dedup | By normalized name; shortcut beats AUMID, user scope beats system scope. Ids are derived from the name so favorites survive a change of launch method. |
+| Categories | Rule-based behind a `Classifier` protocol. Rename/add/delete categories, per-app category, hide, favorite. |
+| User data | Overrides live in separate files from discovered data, so a rescan never loses manual changes. |
+| UI | Collapsible sidebar, top bar (search, workspace pill, quick launch, grid/list toggle, settings). Ctrl+K search, Ctrl+B sidebar, Ctrl+1…6 pages. |
+| Icons | Shell icons (up to 256 px, also for packaged apps), cached on disk, loaded lazily; letter tile fallback. |
+| Running apps | psutil poll every 5 s on a worker thread, paused while minimized. |

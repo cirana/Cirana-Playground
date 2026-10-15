@@ -12,7 +12,7 @@ from cirana.ui.theme import ACCENT
 
 
 class SearchOverlay(QWidget):
-    """Child widget covering the main window, so focus and native embedding stay unaffected."""
+    """Child widget covering the main window (not a separate top-level window, so focus stays in CIRANA)."""
 
     navigate = Signal(str, object)
     visibility_changed = Signal(bool)
@@ -47,7 +47,7 @@ class SearchOverlay(QWidget):
         self.hint.setContentsMargins(18, 6, 0, 2)
         layout.addWidget(self.hint)
 
-        self.workspace_provider = lambda: []  # Phase 3 plugs real workspaces in here
+        self.workspace_provider = lambda: []  # the main window plugs the workspaces in
         parent.installEventFilter(self)
 
     # -- lifecycle --------------------------------------------------------------

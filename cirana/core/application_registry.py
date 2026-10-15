@@ -127,9 +127,6 @@ class ApplicationRegistry(QObject):
                 break
         return result
 
-    def launch_mode(self, app_id: str) -> str:
-        return self._over["launch_modes"].get(app_id, "external")
-
     # -- user mutations -----------------------------------------------------
     def set_category(self, app_id: str, category_id: str) -> None:
         if not self.category_exists(category_id):
@@ -200,10 +197,6 @@ class ApplicationRegistry(QObject):
         recents.insert(0, {"id": app_id, "ts": time.time()})
         self._favs["recents"] = recents[:MAX_RECENTS]
         self._save_favs()
-
-    def set_launch_mode(self, app_id: str, mode: str) -> None:
-        self._over["launch_modes"][app_id] = mode
-        self._save_over()
 
     def add_custom_app(self, name: str, target: str, launch_type: str, arguments: str = "") -> AppEntry:
         name, target = name.strip(), target.strip()

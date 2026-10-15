@@ -1,3 +1,3 @@
-"""CIRANA - a desktop playground for Windows."""
+"""CIRANA - an application launcher and workspace window manager for Windows."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

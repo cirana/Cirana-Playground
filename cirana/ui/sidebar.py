@@ -11,7 +11,7 @@ NAV_ITEMS: list[tuple[str, str, str]] = [
     ("home", "Home", "home"),
     ("applications", "Applications", "apps"),
     ("workspaces", "Workspaces", "workspaces"),
-    ("playground", "Playground", "playground"),
+    ("windows", "Windows", "monitor"),
     ("favorites", "Favorites", "star"),
     ("settings", "Settings", "settings"),
 ]

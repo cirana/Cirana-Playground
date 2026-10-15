@@ -67,7 +67,8 @@ def main() -> None:
     user32.RegisterClassW(ctypes.byref(window_class))
     hwnd = user32.CreateWindowExW(0, "CiranaHangTestWindow", "CIRANA hang test window", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                   200, 200, 560, 340, None, None, instance, None)
-    print(f"READY {int(hwnd)}", flush=True)
+    if sys.stdout is not None:  # pythonw.exe (no console) has no stdout
+        print(f"READY {int(hwnd)}", flush=True)
     msg = wintypes.MSG()
     while True:
         if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):

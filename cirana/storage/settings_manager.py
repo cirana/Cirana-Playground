@@ -1,8 +1,10 @@
 """Owns every JSON file CIRANA persists and exposes typed accessors."""
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,23 @@ def _has(kind: type, **fields: type):
         return isinstance(data, kind) and all(isinstance(data.get(k), t) for k, t in fields.items())
 
     return check
+
+
+def _migrate_workspaces(version: int, data: Any) -> Any:
+    from cirana.core.workspaces import migrate_workspaces  # the model lives in core (imports this module)
+
+    return migrate_workspaces(version, data)
+
+
+def _keep_v1_copy(path: Path, copy: Path) -> None:
+    """Before a version 1 workspaces file is migrated, keep it as it was (once): the migration is one-way."""
+    if copy.exists() or not path.exists():
+        return
+    try:
+        if json.loads(path.read_text(encoding="utf-8")).get("version") == 1:
+            shutil.copyfile(path, copy)
+    except (OSError, ValueError, AttributeError):
+        logging.getLogger(__name__).warning("Could not keep a copy of the version 1 workspaces file")
 
 
 class SettingsManager:
@@ -64,12 +83,10 @@ class SettingsManager:
             1,
             _has(dict, hidden=list, custom_apps=list, launch_modes=dict),
         )
+        _keep_v1_copy(self.root / "workspaces.json", self.root / "workspaces.v1.json")
         self.workspaces_store = JsonStore(
-            self.root / "workspaces.json", deep_default({"workspaces": []}), 1, _has(dict, workspaces=list)
-        )
-        # Windows CIRANA currently hosts; used to report applications left without a window after a crash.
-        self.playground_store = JsonStore(
-            self.root / "playground_session.json", deep_default({"embedded": []}), 1, _has(dict, embedded=list)
+            self.root / "workspaces.json", deep_default({"workspaces": []}), 2, _has(dict, workspaces=list),
+            migrate=_migrate_workspaces,
         )
 
         self.config: dict[str, Any] = {**DEFAULT_CONFIG, **self.config_store.load()}

@@ -1,25 +1,23 @@
-"""Workspaces: storage, CRUD, one-click opening (with duplicate prevention), saved sessions and the page UI."""
+"""Phase 3 / 5: the workspace data model, its storage, and the migration of the Playground-era (version 1) file."""
+import json
 import os
-import shutil
-import tempfile
-import time
 import unittest
-from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QByteArray, QMimeData  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from cirana.core import playground, workspace_launcher  # noqa: E402
 from cirana.core.application_registry import ApplicationRegistry  # noqa: E402
-from cirana.core.models import AppEntry, LaunchResult, stable_app_id  # noqa: E402
-from cirana.core.playground import SessionState  # noqa: E402
-from cirana.core.workspaces import MODE_EMBEDDED, MODE_EXTERNAL, SavedLayout, WorkspaceManager  # noqa: E402
-from cirana.native import window_embedder as embedder  # noqa: E402
-from cirana.native.window_discovery import WindowInfo  # noqa: E402
+from cirana.core.models import AppEntry, stable_app_id  # noqa: E402
+from cirana.core.workspaces import WorkspaceManager, legacy_entry_id  # noqa: E402
 from cirana.storage.settings_manager import SettingsManager  # noqa: E402
-from cirana.widgets.dnd import APP_MIME  # noqa: E402
+from cirana.wm.identity import MatchRule, TrackedWindow  # noqa: E402
+from cirana.wm.layout import FREE, GRID, MAIN_SIDE, FreeSlot, LayoutSpec  # noqa: E402
+from cirana.wm.monitors import Monitor  # noqa: E402
 from tests.support import TempHomeTestCase  # noqa: E402
+
+app = QApplication.instance() or QApplication([])
+MONITOR = Monitor("\\\\.\\DISPLAY1", (0, 0, 2000, 1000), (0, 0, 2000, 1000), True, 96)
 
 
 def exe_app(name):
@@ -28,21 +26,21 @@ def exe_app(name):
                     exe_path=path)
 
 
-def unhostable_app(name):
-    # a shell item (no package, no executable): CIRANA cannot tell which window is its window
-    return AppEntry(id=stable_app_id(name), name=name, launch_type="aumid", target=f"Shell.{name}", source="packaged")
+def window(exe, title="Window", hwnd=0x10, pid=5):
+    return TrackedWindow(hwnd, pid, 1.0, exe.lower(), "", title, "Cls")
 
 
 class ManagerTests(TempHomeTestCase):
     def setUp(self):
         super().setUp()
+        self.monitors = [MONITOR]
         self.build()
 
     def build(self):
         self.settings = SettingsManager(self.home)
         self.registry = ApplicationRegistry(self.settings)
-        self.registry.apply_scan([exe_app("Alpha"), exe_app("Beta"), unhostable_app("Gamma")])
-        self.ws = WorkspaceManager(self.settings, self.registry)
+        self.registry.apply_scan([exe_app("Alpha"), exe_app("Beta")])
+        self.ws = WorkspaceManager(self.settings, self.registry, monitors=lambda: self.monitors)
 
     def test_create_rename_delete(self):
         work = self.ws.create("  Work   Stuff ")
@@ -58,45 +56,71 @@ class ManagerTests(TempHomeTestCase):
                 self.ws.create(bad)
         self.ws.delete(work.id)
         self.assertIsNone(self.ws.get(work.id))
-        with self.assertRaises(ValueError):
-            self.ws.rename(work.id, "Ghost")
 
-    def test_applications_are_deduplicated_and_modes_default_sensibly(self):
+    def test_catalog_apps_are_deduplicated_but_windows_of_one_app_are_separate(self):
         w = self.ws.create("W")
-        self.assertTrue(self.ws.add_app(w.id, stable_app_id("Alpha")))
-        self.assertFalse(self.ws.add_app(w.id, stable_app_id("Alpha")))  # already there
-        self.assertFalse(self.ws.add_app(w.id, "app-unknown"))
-        self.registry.set_launch_mode(stable_app_id("Beta"), MODE_EMBEDDED)  # the app's own preference wins
-        self.registry.set_launch_mode(stable_app_id("Gamma"), MODE_EMBEDDED)  # ...unless it cannot be hosted at all
-        self.ws.add_app(w.id, stable_app_id("Beta"))
-        self.ws.add_app(w.id, stable_app_id("Gamma"))
-        modes = {a.name: a.mode for a in self.ws.get(w.id).apps}
-        self.assertEqual(modes, {"Alpha": MODE_EXTERNAL, "Beta": MODE_EMBEDDED, "Gamma": MODE_EXTERNAL})
+        self.assertIsNotNone(self.ws.add_app(w.id, stable_app_id("Alpha")))
+        self.assertIsNone(self.ws.add_app(w.id, stable_app_id("Alpha")))  # dragged twice: once
+        self.assertIsNone(self.ws.add_app(w.id, "app-unknown"))
+        first = self.ws.add_window(w.id, window("C:\\Tools\\Beta.exe", "Beta - one"))
+        second = self.ws.add_window(w.id, window("C:\\Tools\\Beta.exe", "Beta - two", hwnd=0x20))
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual((first.app_id, first.hint_title), (stable_app_id("Beta"), "Beta - one"))  # recognised
+        self.assertEqual(len(self.ws.get(w.id).apps), 3)
 
-    def test_mode_order_and_removal(self):
+    def test_window_without_a_catalog_application(self):
+        w = self.ws.create("W")
+        entry = self.ws.add_window(w.id, window("D:\\Portable\\tool.exe", "Tool"))
+        self.assertEqual((entry.app_id, entry.name, entry.launch), ("", "Tool", False))
+        self.assertTrue(self.ws.rule_for(entry).matches(window("D:\\Portable\\tool.exe", "Other title")))
+
+    def test_order_launch_flag_and_removal(self):
         w = self.ws.create("W", [stable_app_id("Alpha"), stable_app_id("Beta")])
-        alpha, beta = stable_app_id("Alpha"), stable_app_id("Beta")
-        self.ws.set_mode(w.id, alpha, MODE_EXTERNAL)
-        with self.assertRaises(ValueError):
-            self.ws.set_mode(w.id, alpha, "floating")
-        self.ws.move_app(w.id, beta, -1)
-        self.ws.move_app(w.id, beta, -1)  # already first: no-op
-        self.assertEqual([a.app_id for a in self.ws.get(w.id).apps], [beta, alpha])
-        self.ws.remove_app(w.id, beta)
-        self.assertEqual([a.app_id for a in self.ws.get(w.id).apps], [alpha])
+        alpha, beta = self.ws.get(w.id).apps
+        self.ws.move_entry(w.id, beta.id, 0)
+        self.assertEqual([a.app_id for a in self.ws.get(w.id).apps], [stable_app_id("Beta"), stable_app_id("Alpha")])
+        self.ws.move_entry(w.id, beta.id, 99)  # clamped
+        self.assertEqual(self.ws.get(w.id).apps[-1].id, beta.id)
+        self.ws.set_launch(w.id, alpha.id, False)
+        self.assertFalse(self.ws.get(w.id).entry(alpha.id).launch)
+        self.ws.save_positions(w.id, {alpha.id: FreeSlot((0.1, 0.1, 0.5, 0.5), MONITOR.ref())})
+        self.ws.remove_entry(w.id, alpha.id)
+        self.assertEqual([a.id for a in self.ws.get(w.id).apps], [beta.id])
+        self.assertNotIn(alpha.id, self.ws.get(w.id).layout.free)
 
-    def test_everything_survives_a_restart(self):
-        w = self.ws.create("Persisted", [stable_app_id("Alpha")])
-        self.ws.set_mode(w.id, stable_app_id("Alpha"), MODE_EXTERNAL)
-        self.ws.save_layout(w.id, SavedLayout(["a"], "a", {"a": {"rect": [1, 2, 3, 4], "maximized": True}}))
+    def test_everything_survives_a_restart_and_no_handle_or_pid_is_stored(self):
+        w = self.ws.create("Dev", [stable_app_id("Alpha")])
+        entry = self.ws.add_window(w.id, window("C:\\Tools\\Beta.exe", "Beta"))
+        self.ws.set_layout(w.id, LayoutSpec(MAIN_SIDE, gap=12, ratio=0.7, monitor=MONITOR.ref()))
+        self.ws.save_positions(w.id, {entry.id: FreeSlot((0, 0, 0.5, 1), MONITOR.ref(), True)})
         self.ws.set_active(w.id)
         self.build()
         again = self.ws.get(w.id)
-        self.assertEqual(again.name, "Persisted")
-        self.assertEqual(again.apps[0].mode, MODE_EXTERNAL)
-        self.assertEqual(again.layout.windows["a"], {"rect": [1, 2, 3, 4], "maximized": True})
-        self.assertGreater(again.layout.saved_at, 0)
         self.assertEqual(self.ws.active_id, w.id)
+        self.assertEqual(again.layout.kind, FREE)
+        self.assertEqual(again.layout.ratio, 0.7)
+        self.assertTrue(again.layout.free[entry.id].maximized)
+        self.assertEqual([a.id for a in again.apps], [a.id for a in w.apps])
+        raw = (self.home / "workspaces.json").read_text(encoding="utf-8")
+        self.assertNotIn("hwnd", raw)
+        self.assertNotIn('"pid"', raw)
+        self.assertEqual(json.loads(raw)["version"], 2)
+
+    def test_learning_the_program_that_shows_a_window(self):
+        shell = AppEntry(id=stable_app_id("PowerShell"), name="PowerShell", launch_type="shortcut",
+                         target="C:\\x\\PowerShell.lnk", source="start_menu_user",
+                         exe_path="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+        self.registry.apply_scan([exe_app("Alpha"), shell])
+        w = self.ws.create("Shell", [shell.id])
+        entry = self.ws.get(w.id).apps[0]
+        terminal = window("C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1_x64__8wekyb3d8bbwe\\"
+                          "WindowsTerminal.exe", "Windows PowerShell")
+        self.assertFalse(self.ws.rule_for(entry).matches(terminal))
+        self.ws.remember_window(w.id, entry.id, terminal)
+        self.build()
+        entry = self.ws.get(w.id).apps[0]
+        self.assertTrue(self.ws.rule_for(entry).matches(terminal))  # recognised after a restart
+        self.assertEqual(entry.hint_title, "Windows PowerShell")
 
     def test_deleting_the_active_workspace_clears_it(self):
         w = self.ws.create("W")
@@ -108,70 +132,25 @@ class ManagerTests(TempHomeTestCase):
         self.assertEqual(seen, [w.id, ""])
         self.assertEqual(self.settings.get("active_workspace"), "")
 
-    def test_damaged_file_entries_are_dropped_not_fatal(self):
+    def test_damaged_records_are_dropped_one_by_one(self):
         good = self.ws.create("Good", [stable_app_id("Alpha")])
         self.settings.workspaces_store.save({"workspaces": [
             good.to_dict(), "junk", {"id": "x"}, {"id": "ws-2", "name": "  "},
-            {"id": "ws-3", "name": "Odd", "apps": [{"app_id": ""}, {"app_id": "a", "mode": "weird"}, 5],
-             "layout": {"windows": {"a": {"rect": [1, 2]}}, "tab_order": ["a", 3]}},
-        ]})
-        self.build()
-        self.assertEqual([w.name for w in self.ws.all()], ["Good", "Odd"])
-        odd = self.ws.get("ws-3")
-        self.assertEqual([(a.app_id, a.mode) for a in odd.apps], [("a", MODE_EXTERNAL)])
-        self.assertEqual(odd.layout.windows, {})
-        self.assertEqual(odd.layout.tab_order, ["a"])
-
-    def test_malformed_nested_fields_are_skipped_and_good_data_kept(self):
-        good = self.ws.create("Good", [stable_app_id("Alpha")])
-        self.ws.save_layout(good.id, SavedLayout([stable_app_id("Alpha")], stable_app_id("Alpha"),
-                                                 {stable_app_id("Alpha"): {"rect": [1, 2, 3, 4], "maximized": False}}))
-        alpha = {"app_id": "a", "name": "A", "mode": MODE_EMBEDDED}
-        self.settings.workspaces_store.save({"workspaces": [
-            self.ws.get(good.id).to_dict(),
-            {"id": "ws-apps-null", "name": "Apps null", "apps": None},
-            {"id": "ws-apps-int", "name": "Apps int", "apps": 5, "created": "yesterday", "updated": [1]},
-            {"id": "ws-windows-list", "name": "Windows list", "apps": [alpha],
-             "layout": {"windows": ["a"], "tab_order": None, "active": 7, "saved_at": "soon"}},
-            {"id": "ws-windows-str", "name": "Windows str", "layout": {"windows": "a", "tab_order": 3}},
-            {"id": "ws-tab-str", "name": "Tab str", "layout": {"tab_order": "abc", "windows": {"a": [1, 2, 3, 4]}}},
-            {"id": "ws-bad-rect", "name": "Bad rect",
-             "layout": {"windows": {"a": {"rect": [True, 2, 3, 4]}, "b": {"rect": "1,2,3,4"},
-                                    "c": {"rect": [1, 2, 3, 4], "maximized": True}}}},
-            {"id": "ws-bad-app", "name": "Bad app", "apps": [{"app_id": "a", "name": {"x": 1}, "mode": ["embedded"]},
-                                                             {"app_id": ["b"]}, None]},
-            {"id": "ws-layout-list", "name": "Layout list", "layout": [1, 2], "created": float("nan")},
-            {"id": ["x"], "name": "Bad id"}, {"id": "ws-bad-name", "name": {"n": 1}}, {"id": "", "name": "Empty id"},
-            {"id": "ws-number", "name": 2024},
+            {"id": "ws-3", "name": "Odd", "apps": [{"id": ""}, {"id": "e-1"}, {"id": "e-2", "app_id": "a"}, 5,
+                                                   {"id": "e-3", "rule": {"exe": "c:\\x.exe"}, "launch": "yes"},
+                                                   {"id": "e-2", "app_id": "dup"}],
+             "layout": {"kind": "spiral", "gap": -5, "free": {"e-2": {"fraction": [0, 0, 0, 0]}}}},
+            {"id": "ws-4", "name": 2024, "apps": None, "layout": [1], "created": float("nan")},
         ]})
         self.settings.set("active_workspace", ["not", "a", "string"])
         self.build()  # must not raise
-        self.assertEqual([w.id for w in self.ws.all()], [
-            good.id, "ws-apps-null", "ws-apps-int", "ws-windows-list", "ws-windows-str", "ws-tab-str", "ws-bad-rect",
-            "ws-bad-app", "ws-layout-list", "ws-number",
-        ])
-        self.assertEqual(self.ws.get("ws-number").name, "2024")  # loaded as before
-        kept = self.ws.get(good.id)  # the intact workspace is untouched
-        self.assertEqual([a.app_id for a in kept.apps], [stable_app_id("Alpha")])
-        self.assertEqual(kept.layout.windows[stable_app_id("Alpha")], {"rect": [1, 2, 3, 4], "maximized": False})
-        self.assertEqual(self.ws.get("ws-apps-null").apps, [])
-        self.assertEqual((self.ws.get("ws-apps-int").created, self.ws.get("ws-apps-int").updated), (0.0, 0.0))
-        damaged = self.ws.get("ws-windows-list")
-        self.assertEqual([(a.app_id, a.mode) for a in damaged.apps], [("a", MODE_EMBEDDED)])
-        self.assertEqual((damaged.layout.windows, damaged.layout.tab_order, damaged.layout.active,
-                          damaged.layout.saved_at), ({}, [], "", 0.0))
-        self.assertEqual(self.ws.get("ws-windows-str").layout.tab_order, [])
-        self.assertEqual(self.ws.get("ws-tab-str").layout.tab_order, [])
-        self.assertEqual(self.ws.get("ws-tab-str").layout.windows, {})
-        self.assertEqual(self.ws.get("ws-bad-rect").layout.windows, {"c": {"rect": [1, 2, 3, 4], "maximized": True}})
-        self.assertEqual([(a.app_id, a.name, a.mode) for a in self.ws.get("ws-bad-app").apps],
-                         [("a", "a", MODE_EXTERNAL)])
-        self.assertIsNone(self.ws.get("ws-layout-list").layout)
-        self.assertEqual(self.ws.get("ws-layout-list").created, 0.0)
+        self.assertEqual([w.id for w in self.ws.all()], [good.id, "ws-3", "ws-4"])
+        odd = self.ws.get("ws-3")
+        self.assertEqual([(a.id, a.app_id, a.launch) for a in odd.apps], [("e-2", "a", True), ("e-3", "", True)])
+        self.assertEqual((odd.layout.kind, odd.layout.gap, odd.layout.free), (GRID, 0, {}))
+        self.assertEqual((self.ws.get("ws-4").name, self.ws.get("ws-4").apps, self.ws.get("ws-4").created),
+                         ("2024", [], 0.0))
         self.assertEqual(self.ws.active_id, "")
-        self.ws.rename("ws-apps-int", "Repaired")  # the cleaned data saves and reloads
-        self.build()
-        self.assertEqual(self.ws.get("ws-apps-int").name, "Repaired")
 
     def test_missing_application_keeps_its_stored_name(self):
         w = self.ws.create("W", [stable_app_id("Alpha")])
@@ -181,446 +160,85 @@ class ManagerTests(TempHomeTestCase):
         self.assertIsNone(self.ws.resolve(item))
 
 
-def win(hwnd, exe, title="Window"):
-    return WindowInfo(hwnd, 77, 1, title, "Cls", exe.lower())
+class MigrationTests(TempHomeTestCase):
+    """Version 1 = the Playground design: tab / own-window modes, tab order, absolute window rectangles."""
 
+    V1 = {"version": 1, "data": {"workspaces": [
+        {"id": "ws-a", "name": "Daily", "created": 1.0, "updated": 2.0,
+         "apps": [{"app_id": "app-1", "name": "One", "mode": "external"},
+                  {"app_id": "app-2", "name": "Two", "mode": "embedded"},
+                  {"app_id": "app-3", "name": "Three", "mode": "embedded"},
+                  {"app_id": "app-1", "name": "dup"}],
+         "layout": {"tab_order": ["app-3", "app-2"], "active": "app-3", "saved_at": 5,
+                    "windows": {"app-1": {"rect": [100, 50, 1100, 550], "maximized": True},
+                                "app-2": {"rect": [-9000, -9000, -8000, -8500]}}}},
+        {"id": "ws-b", "name": "Empty", "apps": [], "layout": None},
+        {"id": "ws-c", "name": "Broken", "apps": "nope", "layout": {"windows": "x", "tab_order": 7}},
+    ]}}
 
-class UiBase(unittest.TestCase):
-    """One real (offscreen) CIRANA instance; Win32 embedding, launching and window enumeration are faked."""
+    def write(self, payload):
+        (self.home / "workspaces.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    @classmethod
-    def setUpClass(cls):
-        cls.home = tempfile.mkdtemp(prefix="cirana-ws-")
-        os.environ["CIRANA_HOME"] = cls.home
-        from cirana.main import build_app
+    def load(self, monitors):
+        settings = SettingsManager(self.home)
+        registry = ApplicationRegistry(settings)
+        return settings, WorkspaceManager(settings, registry, monitors=monitors)
 
-        cls.app, cls.window, cls.ctx = build_app([])
-        cls.ctx.registry.apply_scan([exe_app(n) for n in ("Alpha", "Beta", "Delta")] + [unhostable_app("Gamma")])
-        cls.window.show()
-        cls.pump()
+    def test_version_1_is_migrated_without_losing_workspaces(self):
+        self.write(self.V1)
+        _settings, ws = self.load(lambda: [MONITOR])
+        self.assertEqual([w.name for w in ws.all()], ["Daily", "Empty", "Broken"])
+        daily = ws.get("ws-a")
+        # the tab order becomes the entry order; the mode is gone; ids are stable and derived from the app
+        self.assertEqual([a.app_id for a in daily.apps], ["app-3", "app-2", "app-1"])
+        self.assertEqual(daily.apps[2].id, legacy_entry_id("app-1"))
+        self.assertEqual((daily.created, daily.updated > 0), (1.0, True))
+        # saved rectangles became monitor-relative positions; one that is on no monitor is dropped
+        self.assertEqual(daily.layout.kind, FREE)
+        slot = daily.layout.free[legacy_entry_id("app-1")]
+        self.assertEqual((slot.fraction, slot.maximized, slot.monitor.device), ((0.05, 0.05, 0.5, 0.5), True,
+                                                                                MONITOR.device))
+        self.assertNotIn(legacy_entry_id("app-2"), daily.layout.free)
+        self.assertEqual(ws.get("ws-b").layout.kind, GRID)
+        self.assertEqual(ws.get("ws-c").apps, [])
+        saved = json.loads((self.home / "workspaces.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["version"], 2)
+        self.assertNotIn("legacy", json.dumps(saved))
+        backup = json.loads((self.home / "workspaces.v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(backup, self.V1)  # the original, untouched
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.window.pages["playground"].shutdown()
-        cls.ctx.tracker.shutdown()
-        cls.window.close()
-        shutil.rmtree(cls.home, ignore_errors=True)
+    def test_positions_wait_for_the_monitors_when_they_cannot_be_read(self):
+        self.write(self.V1)
 
-    @classmethod
-    def pump(cls, seconds=0.0, until=None, timeout=8.0):
-        end = time.monotonic() + (timeout if until else seconds)
-        while time.monotonic() < end:
-            cls.app.processEvents()
-            if until and until():
-                return True
-            time.sleep(0.005)
-        return bool(until and until())
+        def broken():
+            raise OSError("no display")
 
-    def setUp(self):
-        self.view = self.window.pages["playground"]
-        self.manager = self.ctx.playground
-        self.launches, self.placed, self.fronted = [], [], []
-        self.running_windows = []  # what the launcher sees as already-open windows
-        self.next_hwnd = 0x2000
-        self.manager._launch = self.ctx.launcher._launch = self.fake_launch
-        patches = [
-            mock.patch.object(embedder, "embed", side_effect=self.fake_embed),
-            mock.patch.object(embedder, "detach", return_value=True),
-            mock.patch.object(embedder, "is_alive", return_value=True),
-            mock.patch.object(embedder, "is_still_embedded", return_value=True),
-            mock.patch.object(embedder, "is_hung", return_value=False),
-            mock.patch.object(embedder, "focus"),
-            mock.patch.object(embedder, "set_active"),  # fake HWNDs: never post to a real window
-            # fake HWNDs: never hide or add a taskbar button of whatever real window has that handle
-            mock.patch.object(embedder.taskbar, "hide_button", return_value=True),
-            mock.patch.object(embedder.taskbar, "show_button", return_value=True),
-            mock.patch.object(embedder, "has_focus", return_value=True),
-            mock.patch.object(embedder, "contains_point", return_value=False),
-            mock.patch.object(embedder, "bring_to_front", side_effect=lambda h: self.fronted.append(h) or True),
-            mock.patch.object(playground, "snapshot_handles", return_value=set()),
-            mock.patch.object(workspace_launcher, "snapshot_handles", return_value=set()),
-            mock.patch.object(playground, "wait_for_app_window", side_effect=self.fake_wait),
-            mock.patch.object(workspace_launcher, "wait_for_app_window", side_effect=self.fake_wait),
-            mock.patch.object(workspace_launcher, "list_top_level_windows", side_effect=lambda: list(self.running_windows)),
-            mock.patch.object(workspace_launcher, "place_window", side_effect=lambda *a: self.placed.append(a) or True),
-        ]
-        for patch in patches:
-            patch.start()
-            self.addCleanup(patch.stop)
-        self.addCleanup(self.cleanup)
+        _settings, ws = self.load(broken)
+        self.assertEqual(ws.get("ws-a").layout.free, {})
+        self.assertTrue(ws.get("ws-a").legacy)  # kept for the next start
+        ws.rename("ws-a", "Daily work")  # saving keeps them too
+        _settings, ws = self.load(lambda: [MONITOR])
+        self.assertIn(legacy_entry_id("app-1"), ws.get("ws-a").layout.free)
 
-    def cleanup(self):
-        self.ctx.workspaces.set_active("")
-        for session in list(self.manager.sessions()):
-            self.view.close_tab(session.id)
-        for workspace in self.ctx.workspaces.all():
-            self.ctx.workspaces.delete(workspace.id)
-        self.pump(0.05)
+    def test_a_workspace_that_cannot_be_migrated_does_not_cost_the_others(self):
+        payload = json.loads(json.dumps(self.V1))
+        payload["data"]["workspaces"].insert(0, {"id": "ws-x", "name": "X", "apps": [{"app_id": "a"}],
+                                                 "layout": {"tab_order": "abc"}})
+        payload["data"]["workspaces"].insert(0, 12)
+        self.write(payload)
+        _settings, ws = self.load(lambda: [MONITOR])
+        self.assertIn("Daily", [w.name for w in ws.all()])
 
-    def fake_launch(self, app):
-        self.launches.append(app.name)
-        return LaunchResult(True, "ok", pid=4242)
-
-    def fake_wait(self, before, exe, pid, cancel, **kw):
-        self.next_hwnd += 1
-        return WindowInfo(self.next_hwnd, 4242, 1, "Fake", "Cls", exe)
-
-    def fake_embed(self, info, host_hwnd, width, height, launched_by_cirana):
-        from cirana.native.window_restorer import WindowState
-
-        state = WindowState(info.hwnd, 0, 0, 0, (0, 0, 100, 100), False, False)
-        return embedder.EmbedResult(embedder.EmbedStatus.OK), \
-            embedder.EmbeddedWindow(info.hwnd, host_hwnd, state, info.pid, launched_by_cirana)
-
-    def open_workspace(self, workspace_id):
-        summaries = []
-        self.ctx.launcher.finished.connect(summaries.append)
-        self.assertTrue(self.ctx.launcher.open(workspace_id))
-        self.assertTrue(self.pump(until=lambda: bool(summaries)))
-        self.ctx.launcher.finished.disconnect(summaries.append)
-        return summaries[0]
-
-
-class LauncherTests(UiBase):
-    def make(self, names, **modes):
-        ids = [stable_app_id(n) for n in names]
-        workspace = self.ctx.workspaces.create("Test", ids)
-        for name in names:  # every application asks for a tab unless the test says otherwise
-            self.ctx.workspaces.set_mode(workspace.id, stable_app_id(name), modes.get(name, MODE_EMBEDDED))
-        return workspace
-
-    def test_one_click_opens_tabs_and_normal_windows(self):
-        workspace = self.make(["Alpha", "Beta", "Gamma"], Beta=MODE_EXTERNAL)
-        summary = self.open_workspace(workspace.id)
-        self.assertEqual(summary.in_tabs, ["Alpha"])
-        self.assertEqual(summary.opened, ["Beta"])
-        self.assertEqual([n for n, _ in summary.own_window], ["Gamma"])  # asked for a tab, but CIRANA cannot identify its window
-        self.assertEqual(self.launches, ["Alpha", "Beta", "Gamma"])
-        self.assertEqual(self.view.tabs.count(), 1)
-        self.assertEqual(self.ctx.workspaces.active_id, workspace.id)
-        self.assertIn("1 in tabs, 2 in their own window", summary.message())
-
-    def test_tabs_opened_by_a_workspace_belong_to_it(self):
-        workspace = self.make(["Alpha", "Delta"])
-        self.open_workspace(workspace.id)
-        self.assertTrue(all(s.workspace_id == workspace.id for s in self.manager.sessions()))
-        self.ctx.workspaces.set_active("")  # switching away hides them but keeps the applications alive
-        self.assertEqual(self.view.visible_session_ids(), [])
-        self.assertEqual(len(self.manager.sessions()), 2)
-        self.ctx.workspaces.set_active(workspace.id)
-        self.assertEqual(len(self.view.visible_session_ids()), 2)
-
-    def test_second_open_does_not_start_anything_twice(self):
-        workspace = self.make(["Alpha", "Beta"], Beta=MODE_EXTERNAL)
-        self.open_workspace(workspace.id)
-        self.launches.clear()
-        self.running_windows = [win(900, r"C:\Tools\Beta.exe")]
-        summary = self.open_workspace(workspace.id)
-        self.assertEqual(self.launches, [])
-        self.assertCountEqual(summary.already_open, ["Alpha", "Beta"])
-        self.assertEqual(self.fronted, [900])  # the running window was brought forward, not duplicated
-        self.assertEqual(self.view.tabs.count(), 1)
-
-    def test_running_window_is_adopted_into_a_tab_instead_of_started_again(self):
-        workspace = self.make(["Alpha"])
-        self.running_windows = [win(901, r"C:\Tools\Alpha.exe")]
-        summary = self.open_workspace(workspace.id)
-        self.assertEqual(self.launches, [])
-        self.assertEqual(summary.in_tabs, ["Alpha"])
-        self.assertFalse(self.manager.sessions()[0].launched_by_cirana)  # not CIRANA's to close
-
-    def test_unsupported_app_wanting_a_tab_opens_in_its_own_window(self):
-        workspace = self.make(["Gamma"], Gamma=MODE_EMBEDDED)
-        summary = self.open_workspace(workspace.id)
-        self.assertEqual(summary.in_tabs, [])
-        self.assertEqual([n for n, _ in summary.own_window], ["Gamma"])
-        self.assertEqual(self.view.tabs.count(), 0)
-
-    def test_missing_and_failing_applications_do_not_stop_the_rest(self):
-        workspace = self.make(["Alpha", "Beta", "Delta"], Beta=MODE_EXTERNAL)
-        self.ctx.registry.apply_scan([exe_app("Alpha"), exe_app("Beta"), unhostable_app("Gamma")])  # Delta is gone
-        failing = lambda app: LaunchResult(False, "boom") if app.name == "Beta" else LaunchResult(True, "ok", pid=1)  # noqa: E731
-        self.manager._launch = self.ctx.launcher._launch = failing
-        summary = self.open_workspace(workspace.id)
-        self.assertEqual(summary.in_tabs, ["Alpha"])
-        self.assertEqual(summary.missing, ["Delta"])
-        self.assertEqual(summary.failed, [("Beta", "boom")])
-        self.ctx.registry.apply_scan([exe_app(n) for n in ("Alpha", "Beta", "Delta")] + [unhostable_app("Gamma")])
-
-    def test_workspace_waits_at_least_as_long_as_the_window_search(self):
-        self.assertGreater(workspace_launcher.SETTLE_WAIT, playground.MAX_WINDOW_TIMEOUT)
-        self.assertGreater(self.ctx.launcher._wait_timer.interval(), playground.MAX_WINDOW_TIMEOUT * 1000)
-
-    def slow_search(self, slow_name, release):
-        """A fake window search that keeps looking for ``slow_name`` until ``release`` is set (or it is cancelled),
-        and then still reports a window: like a real search whose result arrives late."""
-        def wait(before, exe, pid, cancel, **kw):
-            if os.path.basename(exe).startswith(slow_name.lower()):
-                while not release.is_set() and not cancel.is_set():
-                    time.sleep(0.01)
-            return self.fake_wait(before, exe, pid, cancel, **kw)
-        return wait
-
-    def test_next_application_waits_until_the_window_search_is_done(self):
-        import threading
-
-        workspace = self.make(["Alpha", "Beta"])
-        release = threading.Event()
-        summaries = []
-        self.ctx.launcher.finished.connect(summaries.append)
-        self.addCleanup(self.ctx.launcher.finished.disconnect, summaries.append)
-        with mock.patch.object(playground, "wait_for_app_window", side_effect=self.slow_search("Alpha", release)):
-            self.assertTrue(self.ctx.launcher.open(workspace.id))
-            self.pump(0.6)
-            self.assertEqual(self.launches, ["Alpha"])  # Alpha's search is still running: Beta is not started yet
-            release.set()
-            self.assertTrue(self.pump(until=lambda: bool(summaries)))
-        self.assertEqual(self.launches, ["Alpha", "Beta"])
-        self.assertEqual(summaries[0].in_tabs, ["Alpha", "Beta"])
-        self.assertEqual(summaries[0].failed, [])
-
-    def test_giving_up_cancels_the_search_so_a_late_window_is_never_attached(self):
-        import threading
-
-        workspace = self.make(["Alpha", "Beta"])
-        release = threading.Event()
-        self.addCleanup(release.set)
-        timer = self.ctx.launcher._wait_timer
-        self.addCleanup(timer.setInterval, timer.interval())
-        timer.setInterval(300)  # the safety net, shortened for the test
-        with mock.patch.object(playground, "wait_for_app_window", side_effect=self.slow_search("Alpha", release)), \
-                mock.patch.object(embedder, "embed", side_effect=self.fake_embed) as embed:
-            summary = self.open_workspace(workspace.id)
-            self.pump(0.3)  # time for a late result to arrive (it must be dropped)
-        self.assertEqual(summary.failed, [("Alpha", "no window appeared in time")])
-        self.assertEqual(summary.in_tabs, ["Beta"])
-        alpha = next(s for s in self.manager.sessions() if s.app_id == stable_app_id("Alpha"))
-        self.assertIs(alpha.state, SessionState.EXTERNAL)  # settled as a normal window, with the reason
-        self.assertIn("stopped looking", alpha.message)
-        self.assertEqual(alpha.hwnd, 0)  # the late window was never attached to it
-        self.assertEqual(embed.call_count, 1)  # only Beta's window was hosted
-        self.assertNotIn(alpha.id, self.manager._jobs)
-
-    def test_only_one_workspace_opens_at_a_time(self):
-        workspace = self.make(["Alpha", "Delta"])
-        summaries = []
-        self.ctx.launcher.finished.connect(summaries.append)
-        self.assertTrue(self.ctx.launcher.open(workspace.id))
-        self.assertFalse(self.ctx.launcher.open(workspace.id))
-        self.assertTrue(self.pump(until=lambda: bool(summaries)))
-        self.ctx.launcher.finished.disconnect(summaries.append)
-        self.assertFalse(self.ctx.launcher.busy)
-
-    def test_deleting_a_workspace_does_not_strand_its_tabs(self):
-        workspace = self.make(["Alpha", "Delta"])
-        self.open_workspace(workspace.id)
-        self.assertEqual(len(self.view.visible_session_ids()), 2)
-        other = self.ctx.workspaces.create("Other")
-        self.ctx.workspaces.set_active(other.id)  # the doomed workspace is NOT active
-        self.assertEqual(self.view.visible_session_ids(), [])
-        self.assertIn("2 applications running in other workspaces", self.view.subtitle.text())
-        self.ctx.workspaces.delete(workspace.id)
-        self.ctx.workspaces.set_active("")
-        self.assertEqual(len(self.view.visible_session_ids()), 2)  # they moved to "No workspace"
-        self.assertTrue(all(self.view._pages[s.id].host.embedded is not None for s in self.manager.sessions()))
-        self.assertTrue(all(s.workspace_id == "" for s in self.manager.sessions()))
-
-    def test_deleting_the_active_workspace_keeps_its_tabs_reachable(self):
-        workspace = self.make(["Alpha"])
-        self.open_workspace(workspace.id)
-        self.ctx.workspaces.delete(workspace.id)  # active workspace goes away -> active becomes "none"
-        self.assertEqual(self.ctx.workspaces.active_id, "")
-        self.assertEqual(len(self.view.visible_session_ids()), 1)
-
-    def test_saved_session_restores_tab_order_active_tab_and_window_positions(self):
-        alpha, delta, beta = (stable_app_id(n) for n in ("Alpha", "Delta", "Beta"))
-        workspace = self.make(["Alpha", "Delta", "Beta"], Beta=MODE_EXTERNAL)
-        layout = SavedLayout(tab_order=[delta, alpha], active=alpha,
-                             windows={beta: {"rect": [10, 20, 810, 620], "maximized": False}})
-        self.ctx.workspaces.save_layout(workspace.id, layout)
-        self.open_workspace(workspace.id)
-        self.pump(0.2)
-        titles = [self.manager.get(sid).app_id for sid in self.view.tab_order()]
-        self.assertEqual(titles, [delta, alpha])
-        self.assertEqual(self.manager.get(self.view.current_session_id()).app_id, alpha)
-        self.assertTrue(self.pump(until=lambda: bool(self.placed)))
-        self.assertEqual(self.placed[0][1:], ((10, 20, 810, 620), False))
-
-    def test_build_layout_captures_what_is_open(self):
-        workspace = self.make(["Alpha"])
-        self.open_workspace(workspace.id)
-        extra = self.manager.open_app(stable_app_id("Delta"), workspace.id)
-        self.pump(until=lambda: self.manager.get(extra.session_id).state is not SessionState.LAUNCHING)
-        self.ctx.workspaces.set_mode(workspace.id, stable_app_id("Alpha"), MODE_EMBEDDED)
-        current = self.ctx.workspaces.get(workspace.id)
-        placements = {stable_app_id("Beta"): {"rect": [1, 2, 3, 4], "maximized": True}, stable_app_id("Alpha"): {"rect": [9, 9, 9, 9], "maximized": False}}
-        layout, new_apps = workspace_launcher.build_layout(current, self.manager, self.ctx.registry, placements)
-        self.assertEqual(layout.tab_order, [stable_app_id("Alpha"), stable_app_id("Delta")])
-        self.assertEqual(new_apps, [(stable_app_id("Delta"), MODE_EMBEDDED)])  # open here but not listed yet
-        self.assertEqual(layout.windows, {stable_app_id("Beta"): {"rect": [1, 2, 3, 4], "maximized": True}})  # hosted apps have no window position
-        self.assertTrue(layout.active)
-
-
-class WorkspaceViewTests(UiBase):
-    def drop(self, widget, app_id):
-        mime = QMimeData()
-        mime.setData(APP_MIME, QByteArray(app_id.encode()))
-        event = mock.Mock()
-        event.mimeData.return_value = mime
-        widget.dragEnterEvent(event)
-        event.acceptProposedAction.assert_called()
-        widget.dropEvent(event)
-
-    def test_page_lists_workspaces_and_edits_them(self):
-        view = self.window.pages["workspaces"]
-        workspace = self.ctx.workspaces.create("Study", [stable_app_id("Alpha")])
-        self.window.show_page("workspaces", save=False)
-        view.select(workspace.id)
-        view.refresh()
-        self.assertEqual(view.title.text(), "Study")
-        self.assertEqual(view.rows_layout.count(), 3)  # one row + drop zone + stretch
-        with mock.patch("cirana.ui.workspace_view.QInputDialog.getText", return_value=("Exams", True)):
-            view.rename(workspace.id)
-        self.assertEqual(self.ctx.workspaces.get(workspace.id).name, "Exams")
-        with mock.patch("cirana.ui.workspace_view.QMessageBox.question", return_value=mock.sentinel.no):
-            view.delete(workspace.id)
-        self.assertIsNotNone(self.ctx.workspaces.get(workspace.id))
-        from PySide6.QtWidgets import QMessageBox
-
-        with mock.patch("cirana.ui.workspace_view.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
-            view.delete(workspace.id)
-        self.assertIsNone(self.ctx.workspaces.get(workspace.id))
-        view.refresh()
-        self.assertTrue(view.detail.isHidden())  # nothing left: the empty state takes over
-
-    def test_dragging_an_application_onto_a_workspace_adds_it(self):
-        view = self.window.pages["workspaces"]
-        first, second = self.ctx.workspaces.create("One"), self.ctx.workspaces.create("Two")
-        view.select(first.id)
-        view.refresh()
-        self.drop(view, stable_app_id("Alpha"))  # onto the page: the selected workspace
-        self.assertTrue(self.ctx.workspaces.get(first.id).has(stable_app_id("Alpha")))
-        item = next(i for i in view.list_host.findChildren(type(view.list_layout.itemAt(0).widget()))
-                    if i.workspace_id == second.id)
-        self.drop(item, stable_app_id("Beta"))  # onto a list entry: that workspace
-        self.assertTrue(self.ctx.workspaces.get(second.id).has(stable_app_id("Beta")))
-        self.drop(item, stable_app_id("Beta"))  # twice is harmless
-        self.assertEqual(len(self.ctx.workspaces.get(second.id).apps), 1)
-
-    def test_mode_combo_is_stored(self):
-        view = self.window.pages["workspaces"]
-        workspace = self.ctx.workspaces.create("Modes", [stable_app_id("Alpha")])
-        view.select(workspace.id)
-        view.refresh()
-        from PySide6.QtWidgets import QComboBox
-
-        combo = view.rows_host.findChildren(QComboBox)[0]
-        self.assertEqual(self.ctx.workspaces.get(workspace.id).apps[0].mode, MODE_EXTERNAL)  # tabs are opt-in
-        combo.setCurrentIndex(0)
-        self.assertEqual(self.ctx.workspaces.get(workspace.id).apps[0].mode, MODE_EMBEDDED)
-
-    def card_for(self, name):
-        self.window.show_page("applications", save=False)
-        self.pump(0.1)
-        self.window._refresh_timer.stop()
-        self.window._refresh_current()
-        return self.window.pages["applications"].collection._items[stable_app_id(name)]
-
-    def mouse(self, widget, kind, local, buttons=None):
-        from PySide6.QtCore import QEvent, QPointF, Qt
-        from PySide6.QtGui import QMouseEvent
-        from PySide6.QtWidgets import QApplication
-
-        left = Qt.MouseButton.LeftButton
-        pressed = {QEvent.Type.MouseButtonPress: left, QEvent.Type.MouseButtonRelease: left}.get(kind, Qt.MouseButton.NoButton)
-        held = buttons if buttons is not None else (left if kind is not QEvent.Type.MouseButtonRelease else Qt.MouseButton.NoButton)
-        QApplication.sendEvent(widget, QMouseEvent(kind, QPointF(local), QPointF(widget.mapToGlobal(local)), pressed, held,
-                                                   Qt.KeyboardModifier.NoModifier))
-
-    def test_drag_starts_only_after_the_threshold_and_carries_the_application(self):
-        from PySide6.QtCore import QEvent, QPoint
-
-        from cirana.widgets import app_card
-
-        card = self.card_for("Alpha")
-        started = []
-
-        class FakeDrag:
-            def __init__(self, source):
-                started.append(self)
-                self.mime = None
-
-            def setMimeData(self, mime):
-                self.mime = mime
-
-            def setPixmap(self, _p):
-                pass
-
-            def setHotSpot(self, _p):
-                pass
-
-            def exec(self, _action):
-                states.append(("exec", self.mime.hasFormat(APP_MIME), bytes(self.mime.data(APP_MIME)).decode()))
-
-        states = []
-        card.drag_state_changed.connect(lambda on: states.append(on))
-        with mock.patch.object(app_card, "QDrag", FakeDrag):
-            self.mouse(card, QEvent.Type.MouseButtonPress, QPoint(20, 20))
-            self.mouse(card, QEvent.Type.MouseMove, QPoint(22, 21))  # a click with a shaky hand
-            self.assertEqual(started, [])
-            self.mouse(card, QEvent.Type.MouseMove, QPoint(60, 50))  # clearly a drag
-            self.assertEqual(len(started), 1)
-            self.mouse(card, QEvent.Type.MouseMove, QPoint(80, 60))  # still the same press: no second drag
-            self.assertEqual(len(started), 1)
-            self.mouse(card, QEvent.Type.MouseButtonRelease, QPoint(80, 60))
-        self.assertEqual(states, [True, ("exec", True, stable_app_id("Alpha")), False])  # drop bar shown for the drag only
-
-    def test_drop_bar_lists_workspaces_while_dragging(self):
-        self.ctx.workspaces.create("Alpha group")
-        bar = self.window.drop_bar
-        self.ctx.actions.drag_active.emit(True)
-        self.assertFalse(bar.isHidden())
-        from cirana.widgets.workspace_drop_bar import DropChip
-
-        names = [c.text() for c in bar.findChildren(DropChip)]
-        self.assertIn("Alpha group", names)
-        self.assertIn("+ New workspace", names)
-        chip = next(c for c in bar.findChildren(DropChip) if c.text() == "Alpha group")
-        self.drop(chip, stable_app_id("Delta"))
-        self.ctx.actions.drag_active.emit(False)
-        self.assertTrue(bar.isHidden())
-        self.assertTrue(self.ctx.workspaces.all()[0].has(stable_app_id("Delta")))
-
-    def test_save_session_stores_open_tabs_and_new_applications(self):
-        view = self.window.pages["workspaces"]
-        workspace = self.ctx.workspaces.create("Session", [stable_app_id("Alpha")])
-        self.ctx.workspaces.set_active(workspace.id)
-        out = self.manager.open_app(stable_app_id("Delta"), workspace.id)
-        self.pump(until=lambda: self.manager.get(out.session_id).state is not SessionState.LAUNCHING)
-        with mock.patch("cirana.ui.workspace_view.external_placements", return_value={}):
-            view.save_session(workspace.id)
-            self.assertTrue(self.pump(until=lambda: self.ctx.workspaces.get(workspace.id).layout is not None))
-        saved = self.ctx.workspaces.get(workspace.id)
-        self.assertEqual(saved.layout.tab_order, [stable_app_id("Delta")])
-        self.assertTrue(saved.has(stable_app_id("Delta")))
-
-    def test_context_menu_can_add_to_workspace(self):
-        from PySide6.QtCore import QPoint
-        from PySide6.QtWidgets import QMenu
-
-        self.ctx.workspaces.create("Menu target")
-        built = []
-
-        class NonBlockingMenu(QMenu):
-            def exec(self, pos):
-                built.append([a.text() for a in self.actions()])
-
-        with mock.patch("cirana.ui.app_actions.QMenu", NonBlockingMenu):
-            self.ctx.actions.show_menu(stable_app_id("Alpha"), QPoint(1, 1))
-        self.assertIn("Add to workspace", built[0])
-        self.assertIn("Open in a Playground tab", built[0])
-        self.ctx.actions.add_to_workspace(stable_app_id("Alpha"), self.ctx.workspaces.all()[0].id)
-        self.assertTrue(self.ctx.workspaces.all()[0].has(stable_app_id("Alpha")))
+    def test_rules_are_derived_from_the_catalog_after_migration(self):
+        self.write(self.V1)
+        settings = SettingsManager(self.home)
+        registry = ApplicationRegistry(settings)
+        registry.apply_scan([AppEntry(id="app-1", name="One", launch_type="executable", target="C:\\One\\one.exe",
+                                      source="user", exe_path="C:\\One\\one.exe")])
+        ws = WorkspaceManager(settings, registry, monitors=lambda: [MONITOR])
+        entry = ws.get("ws-a").entry(legacy_entry_id("app-1"))
+        self.assertEqual(entry.rule, MatchRule())
+        self.assertTrue(ws.rule_for(entry).matches(window("C:\\One\\one.exe")))
 
 
 if __name__ == "__main__":

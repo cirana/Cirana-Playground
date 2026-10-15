@@ -34,8 +34,38 @@ def launch(app: AppEntry) -> LaunchResult:
 def _launch_shortcut(app: AppEntry) -> LaunchResult:
     if not os.path.exists(app.target):
         return LaunchResult(False, f"Shortcut no longer exists: {app.target}")
-    os.startfile(app.target)  # type: ignore[attr-defined]  # ShellExecute handles MSI shortcuts + elevation
-    return LaunchResult(True, f"Launched {app.name}")
+    # ShellExecute handles MSI shortcuts and elevation. The Ex form also returns the started process (when one was
+    # created), so the window manager can follow launchers such as Discord's Update.exe to the real program.
+    try:
+        import pythoncom
+        import win32process
+        from win32com.shell import shell, shellcon
+    except ImportError:
+        os.startfile(app.target)  # type: ignore[attr-defined]
+        return LaunchResult(True, f"Launched {app.name}")
+    # The workspace launcher calls this on a worker thread: ShellExecuteEx needs COM there, and NOASYNC (the same bit
+    # as FLAG_DDEWAIT) because the thread has no message loop to finish the request on.
+    try:
+        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)  # also fine (counted) where Qt initialised it
+        initialised = True
+    except pythoncom.com_error:  # COM already runs in another mode on this thread: usable as it is
+        initialised = False
+    try:
+        info = shell.ShellExecuteEx(fMask=shellcon.SEE_MASK_NOCLOSEPROCESS | shellcon.SEE_MASK_FLAG_DDEWAIT,
+                                    lpVerb="open", lpFile=app.target, nShow=1)  # SW_SHOWNORMAL
+    except Exception as exc:  # noqa: BLE001 - pywintypes.error (e.g. the user cancelled the UAC prompt)
+        raise OSError(getattr(exc, "strerror", None) or str(exc)) from exc
+    finally:
+        if initialised:
+            pythoncom.CoUninitialize()
+    handle = info.get("hProcess")
+    pid = None
+    if handle:
+        try:
+            pid = int(win32process.GetProcessId(handle)) or None
+        finally:
+            handle.Close()
+    return LaunchResult(True, f"Launched {app.name}", pid=pid)
 
 
 def _launch_executable(app: AppEntry) -> LaunchResult:

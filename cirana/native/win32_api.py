@@ -1,7 +1,8 @@
-"""Typed ctypes bindings for the Win32 calls used by window discovery and embedding.
+"""Typed ctypes bindings for the Win32 calls the window manager uses.
 
-Every function gets explicit ``argtypes``/``restype`` so that 64-bit handles and
-LONG_PTR values are never truncated to 32-bit ints.
+Every function gets explicit ``argtypes``/``restype`` so that 64-bit handles and LONG_PTR values are never truncated
+to 32-bit ints. Deliberately absent: anything that re-parents a window or changes its styles (SetParent,
+SetWindowLongPtr), attaches input queues or injects input. tests/test_forbidden_apis.py keeps it that way.
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ HWND = wintypes.HWND
 # GetWindowLong index values
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
-GWLP_HWNDPARENT = -8
 
 # Window styles
 WS_OVERLAPPED = 0x00000000
@@ -52,50 +52,35 @@ SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
-SWP_FRAMECHANGED = 0x0020
-SWP_SHOWWINDOW = 0x0040
 SWP_NOOWNERZORDER = 0x0200
 SWP_ASYNCWINDOWPOS = 0x4000  # post the request to the owning thread instead of sending it (never blocks on a hung app)
 
-SW_HIDE = 0
 SW_SHOWNORMAL = 1
-SW_SHOWMINIMIZED = 2
 SW_SHOWMAXIMIZED = 3
 SW_SHOWNOACTIVATE = 4
-SW_SHOW = 5
 SW_MINIMIZE = 6
 SW_SHOWMINNOACTIVE = 7
 SW_RESTORE = 9
 
-MONITOR_DEFAULTTONULL = 0
-
 GA_PARENT = 1
-GA_ROOT = 2
-GW_HWNDPREV = 3
 GW_OWNER = 4
 
 WM_CLOSE = 0x0010
-WM_ACTIVATE = 0x0006
-WM_NCACTIVATE = 0x0086
-WA_INACTIVE = 0
-WA_ACTIVE = 1
-
-VK_LBUTTON = 0x01
-VK_RBUTTON = 0x02
-VK_MBUTTON = 0x04
 
 DWMWA_EXTENDED_FRAME_BOUNDS = 9
 DWMWA_CLOAKED = 14
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 TOKEN_QUERY = 0x0008
-TokenElevation = 20
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, HWND, wintypes.LPARAM)
 
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+WPF_RESTORETOMAXIMIZED = 0x0002
 
 
 class WINDOWPLACEMENT(ctypes.Structure):
@@ -122,38 +107,21 @@ IsZoomed = _bind(user32, "IsZoomed", wintypes.BOOL, HWND)
 GetWindowTextW = _bind(user32, "GetWindowTextW", ctypes.c_int, HWND, wintypes.LPWSTR, ctypes.c_int)
 GetWindowTextLengthW = _bind(user32, "GetWindowTextLengthW", ctypes.c_int, HWND)
 GetClassNameW = _bind(user32, "GetClassNameW", ctypes.c_int, HWND, wintypes.LPWSTR, ctypes.c_int)
-GetParent = _bind(user32, "GetParent", HWND, HWND)
 GetAncestor = _bind(user32, "GetAncestor", HWND, HWND, wintypes.UINT)
 GetWindow = _bind(user32, "GetWindow", HWND, HWND, wintypes.UINT)
 GetDesktopWindow = _bind(user32, "GetDesktopWindow", HWND)
-SetParent = _bind(user32, "SetParent", HWND, HWND, HWND)
 GetWindowRect = _bind(user32, "GetWindowRect", wintypes.BOOL, HWND, ctypes.POINTER(wintypes.RECT))
-GetClientRect = _bind(user32, "GetClientRect", wintypes.BOOL, HWND, ctypes.POINTER(wintypes.RECT))
 SetWindowPos = _bind(user32, "SetWindowPos", wintypes.BOOL, HWND, HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                      ctypes.c_int, wintypes.UINT)
-MoveWindow = _bind(user32, "MoveWindow", wintypes.BOOL, HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                   wintypes.BOOL)
-ShowWindow = _bind(user32, "ShowWindow", wintypes.BOOL, HWND, ctypes.c_int)
 ShowWindowAsync = _bind(user32, "ShowWindowAsync", wintypes.BOOL, HWND, ctypes.c_int)  # posted: never blocks
 GetWindowPlacement = _bind(user32, "GetWindowPlacement", wintypes.BOOL, HWND, ctypes.POINTER(WINDOWPLACEMENT))
-SetWindowPlacement = _bind(user32, "SetWindowPlacement", wintypes.BOOL, HWND, ctypes.POINTER(WINDOWPLACEMENT))
 SetForegroundWindow = _bind(user32, "SetForegroundWindow", wintypes.BOOL, HWND)
-SetFocus = _bind(user32, "SetFocus", HWND, HWND)
-GetFocus = _bind(user32, "GetFocus", HWND)
-IsChild = _bind(user32, "IsChild", wintypes.BOOL, HWND, HWND)
-GetAsyncKeyState = _bind(user32, "GetAsyncKeyState", ctypes.c_short, ctypes.c_int)
-GetCursorPos = _bind(user32, "GetCursorPos", wintypes.BOOL, ctypes.POINTER(POINT))
 PostMessageW = _bind(user32, "PostMessageW", wintypes.BOOL, HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 IsHungAppWindow = _bind(user32, "IsHungAppWindow", wintypes.BOOL, HWND)
-MonitorFromRect = _bind(user32, "MonitorFromRect", wintypes.HANDLE, ctypes.POINTER(wintypes.RECT), wintypes.DWORD)
-GetForegroundWindow = _bind(user32, "GetForegroundWindow", HWND)
-BringWindowToTop = _bind(user32, "BringWindowToTop", wintypes.BOOL, HWND)
-RedrawWindow = _bind(user32, "RedrawWindow", wintypes.BOOL, HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT)
 
-# GetWindowLongPtr / SetWindowLongPtr exist only on 64-bit; 32-bit exports the plain *Long names.
+# GetWindowLongPtr exists only on 64-bit; 32-bit exports the plain GetWindowLongW. (Read-only: styles are never set.)
 _is_64 = sys.maxsize > 2**32
 GetWindowLongPtrW = _bind(user32, "GetWindowLongPtrW" if _is_64 else "GetWindowLongW", LONG_PTR, HWND, ctypes.c_int)
-SetWindowLongPtrW = _bind(user32, "SetWindowLongPtrW" if _is_64 else "SetWindowLongW", LONG_PTR, HWND, ctypes.c_int, LONG_PTR)
 
 OpenProcess = _bind(kernel32, "OpenProcess", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 CloseHandle = _bind(kernel32, "CloseHandle", wintypes.BOOL, wintypes.HANDLE)
@@ -194,17 +162,6 @@ def window_rect(hwnd: int) -> tuple[int, int, int, int]:
     return rect.left, rect.top, rect.right, rect.bottom
 
 
-def cursor_pos() -> tuple[int, int]:
-    point = POINT()
-    GetCursorPos(ctypes.byref(point))
-    return point.x, point.y
-
-
-def mouse_button_down() -> bool:
-    """Physical state of any mouse button right now (no message is sent to anyone)."""
-    return any(GetAsyncKeyState(vk) & 0x8000 for vk in (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON))
-
-
 def process_image_path(pid: int) -> str:
     handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
@@ -215,28 +172,6 @@ def process_image_path(pid: int) -> str:
         if QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
             return buffer.value
         return ""
-    finally:
-        CloseHandle(handle)
-
-
-def process_is_elevated(pid: int) -> bool | None:
-    """True/False for elevation, None when the token cannot be inspected (often means higher integrity)."""
-    handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return None
-    token = wintypes.HANDLE()
-    try:
-        if not OpenProcessToken(handle, TOKEN_QUERY, ctypes.byref(token)):
-            return None
-        try:
-            elevation = wintypes.DWORD(0)
-            returned = wintypes.DWORD(0)
-            if GetTokenInformation(token, TokenElevation, ctypes.byref(elevation), ctypes.sizeof(elevation),
-                                   ctypes.byref(returned)):
-                return bool(elevation.value)
-            return None
-        finally:
-            CloseHandle(token)
     finally:
         CloseHandle(handle)
 
@@ -277,7 +212,7 @@ ERROR_INVALID_WINDOW_HANDLE = 1400
 
 
 def explain_error(code: int, higher_rights: bool | None = None) -> str:
-    """A readable cause for the Win32 errors window hosting runs into. ``higher_rights``: whether the application's
+    """A readable cause for the Win32 errors moving a window runs into. ``higher_rights``: whether the application's
     integrity level is above CIRANA's (None: its token could not be inspected)."""
     if code == ERROR_ACCESS_DENIED:
         if higher_rights:
@@ -291,7 +226,7 @@ def explain_error(code: int, higher_rights: bool | None = None) -> str:
         return ("Windows denied access (Win32 error 5) although the application runs with the same rights as CIRANA; "
                 "its window refuses to be changed by other programs.")
     if code == ERROR_INVALID_WINDOW_HANDLE:
-        return "The window was closed while CIRANA was setting it up (Win32 error 1400)."
+        return "The window was closed while CIRANA was arranging it (Win32 error 1400)."
     if code:
         return f"Windows refused the change ({ctypes.FormatError(code).strip().rstrip('.')}; Win32 error {code})."
     return "Windows did not apply the change and reported no error code."
@@ -352,15 +287,125 @@ def is_cloaked(hwnd: int) -> bool:
     return False
 
 
-def dpi_awareness_mismatch(hwnd: int) -> str:
-    """Describe a DPI-awareness difference between ``hwnd`` and this process ('' if equal or unknown)."""
+# -- window events, monitors, process identity (window manager) -----------------------------------------------------
+# Out-of-context WinEvent hooks are delivered to the installing thread's message loop: nothing is injected into other
+# processes. Every call below only reads, or (SetWindowPos / ShowWindowAsync) asks the owning thread to move a window.
+WINEVENTPROC = ctypes.WINFUNCTYPE(None, wintypes.HANDLE, wintypes.DWORD, HWND, wintypes.LONG, wintypes.LONG,
+                                  wintypes.DWORD, wintypes.DWORD)
+WINEVENT_OUTOFCONTEXT = 0x0000
+WINEVENT_SKIPOWNPROCESS = 0x0002
+EVENT_SYSTEM_FOREGROUND = 0x0003
+EVENT_SYSTEM_MOVESIZEEND = 0x000B
+EVENT_SYSTEM_MINIMIZESTART = 0x0016
+EVENT_SYSTEM_MINIMIZEEND = 0x0017
+EVENT_OBJECT_CREATE = 0x8000
+EVENT_OBJECT_DESTROY = 0x8001
+EVENT_OBJECT_SHOW = 0x8002
+EVENT_OBJECT_HIDE = 0x8003
+EVENT_OBJECT_LOCATIONCHANGE = 0x800B
+EVENT_OBJECT_NAMECHANGE = 0x800C
+EVENT_OBJECT_CLOAKED = 0x8017
+EVENT_OBJECT_UNCLOAKED = 0x8018
+OBJID_WINDOW = 0
+CHILDID_SELF = 0
+WM_QUIT = 0x0012
+HWND_TOP = 0
+MONITORINFOF_PRIMARY = 0x1
+MDT_EFFECTIVE_DPI = 0
+
+SetWinEventHook = _bind(user32, "SetWinEventHook", wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE,
+                        WINEVENTPROC, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD)
+UnhookWinEvent = _bind(user32, "UnhookWinEvent", wintypes.BOOL, wintypes.HANDLE)
+GetMessageW = _bind(user32, "GetMessageW", wintypes.BOOL, ctypes.POINTER(wintypes.MSG), HWND, wintypes.UINT,
+                    wintypes.UINT)
+TranslateMessage = _bind(user32, "TranslateMessage", wintypes.BOOL, ctypes.POINTER(wintypes.MSG))
+DispatchMessageW = _bind(user32, "DispatchMessageW", LONG_PTR, ctypes.POINTER(wintypes.MSG))
+PostThreadMessageW = _bind(user32, "PostThreadMessageW", wintypes.BOOL, wintypes.DWORD, wintypes.UINT, wintypes.WPARAM,
+                           wintypes.LPARAM)
+GetCurrentThreadId = _bind(kernel32, "GetCurrentThreadId", wintypes.DWORD)
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
+
+
+MONITORENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                                     wintypes.LPARAM)
+EnumDisplayMonitors = _bind(user32, "EnumDisplayMonitors", wintypes.BOOL, wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                            MONITORENUMPROC, wintypes.LPARAM)
+GetMonitorInfoW = _bind(user32, "GetMonitorInfoW", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(MONITORINFOEXW))
+
+
+def _optional(lib_name: str, name: str, restype, *argtypes):
+    """A binding that may not exist on older Windows builds (None then)."""
     try:
-        get_ctx = _bind(user32, "GetWindowDpiAwarenessContext", ctypes.c_void_p, HWND)
-        get_self = _bind(user32, "GetThreadDpiAwarenessContext", ctypes.c_void_p)
-        equal = _bind(user32, "AreDpiAwarenessContextsEqual", wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p)
-    except AttributeError:  # Windows older than 10 1607
-        return ""
-    if equal(get_ctx(hwnd), get_self()):
-        return ""
-    return ("The application uses a different DPI-awareness mode than CIRANA; "
-            "it may look blurry or mis-sized when hosted.")
+        return _bind(ctypes.WinDLL(lib_name, use_last_error=True), name, restype, *argtypes)
+    except (OSError, AttributeError):
+        return None
+
+
+GetDpiForMonitor = _optional("shcore", "GetDpiForMonitor", ctypes.c_long, wintypes.HANDLE, ctypes.c_int,
+                             ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT))
+GetApplicationUserModelId = _optional("kernel32", "GetApplicationUserModelId", ctypes.c_long, wintypes.HANDLE,
+                                      ctypes.POINTER(wintypes.UINT), wintypes.LPWSTR)
+GetThreadDpiAwarenessContext = _optional("user32", "GetThreadDpiAwarenessContext", ctypes.c_void_p)
+GetAwarenessFromDpiAwarenessContext = _optional("user32", "GetAwarenessFromDpiAwarenessContext", ctypes.c_int,
+                                                ctypes.c_void_p)
+GetProcessTimes = _bind(kernel32, "GetProcessTimes", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+                        ctypes.POINTER(wintypes.FILETIME))
+
+
+def monitor_dpi(monitor: int) -> int:
+    """Effective DPI of a monitor (96 = 100 %); 96 when Windows cannot say."""
+    if GetDpiForMonitor is None:
+        return 96
+    x, y = wintypes.UINT(0), wintypes.UINT(0)
+    if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, ctypes.byref(x), ctypes.byref(y)) == 0 and x.value:
+        return int(x.value)
+    return 96
+
+
+def process_dpi_awareness() -> str:
+    """This thread's DPI awareness, for the log ('per-monitor' is what window placement needs)."""
+    if GetThreadDpiAwarenessContext is None or GetAwarenessFromDpiAwarenessContext is None:
+        return "unknown"
+    value = GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext())
+    return {0: "unaware", 1: "system", 2: "per-monitor"}.get(value, f"unknown ({value})")
+
+
+def _filetime_seconds(value: wintypes.FILETIME) -> float:
+    """A FILETIME as Unix seconds (the same clock psutil's create_time() uses)."""
+    ticks = (value.dwHighDateTime << 32) | value.dwLowDateTime
+    return ticks / 10_000_000 - 11_644_473_600 if ticks else 0.0
+
+
+def process_identity(pid: int) -> tuple[float, str, str]:
+    """(creation time, lower-case image path, AppUserModelID) of a process from one limited-rights handle.
+
+    The creation time tells a reused pid apart from the process it named before. Fields that cannot be read are
+    0.0 / "" (protected and elevated processes allow less)."""
+    handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) if pid else None
+    if not handle:
+        return 0.0, "", ""
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        stamp = _filetime_seconds(created) if GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                                              ctypes.byref(kernel), ctypes.byref(user)) else 0.0
+        size = wintypes.DWORD(1024)
+        buffer = ctypes.create_unicode_buffer(1024)
+        exe = buffer.value.lower() if QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)) else ""
+        aumid = ""
+        if GetApplicationUserModelId is not None:
+            length = wintypes.UINT(512)
+            name = ctypes.create_unicode_buffer(512)
+            if GetApplicationUserModelId(handle, ctypes.byref(length), name) == 0:  # ERROR_SUCCESS: packaged process
+                aumid = name.value
+        return stamp, exe, aumid
+    finally:
+        CloseHandle(handle)
+
+
+def last_error() -> int:
+    return ctypes.get_last_error()
