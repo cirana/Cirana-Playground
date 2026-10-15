@@ -27,8 +27,14 @@ How it stays calm and safe:
   ends, a window dropped onto another tile swaps places with it; with all-window tiling, a window dropped onto another
   monitor moves to that monitor's layout; otherwise it goes back to its tile.
 * **Refusals do not spread.** Windows Windows will not let CIRANA move (higher rights) are left out so the others fill
-  the space; windows that are not responding are skipped for that round; minimum sizes are kept. Problems are
-  reported once.
+  the space; windows that are not responding are skipped for that round. Problems are reported once.
+* **Minimum sizes.** An application that refuses to become as small as its tile (WM_GETMINMAXINFO) keeps the left /
+  top edge it was given and grows to the right and down: over its neighbours (which hide that part of it) or off the
+  screen. The controller sees this when it reads the window back (``Status.CONSTRAINED``); the minimum is remembered
+  for that window (per DPI) and the layout is computed again with every tile at least that large. When the minimums
+  do not fit on the monitor together, the newest window with a minimum floats instead, moved (never shrunk) so it
+  is completely on the screen, and the reason is shown. Nothing is ever asked of the application itself (no message
+  is sent to it), and what it draws inside its own window is its own business.
 * **Session based.** Every re-tile is a cancellable worker job with a generation; a newer re-tile, a scope change, a
   drag or CIRANA quitting drop it and its late result. Nothing is undone when CIRANA closes: the windows simply stay.
 
@@ -41,16 +47,17 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
 from cirana.core.background import Job, run_async
 from cirana.core.workspace_controller import EntryState, WorkspaceController, plan_layout
-from cirana.wm.controller import Result, Status
+from cirana.wm.controller import TOLERANCE, Placement, Result, Status
 from cirana.wm.identity import Rect, TrackedWindow
-from cirana.wm.layout import MAIN_SIDE, LayoutSpec
+from cirana.wm.layout import MAIN_SIDE, LayoutSpec, Size, keep_visible, overflowing, tile
 from cirana.wm.monitors import Monitor, MonitorRef, monitor_for_rect, resolve
 
 log = logging.getLogger(__name__)
@@ -78,6 +85,9 @@ class Group:
     id: str
     spec: LayoutSpec
     slots: list[tuple[str, TrackedWindow]]  # (slot id: entry id or window key, window), in layout order
+    # windows that would take part but do not fit beside the others (minimum sizes): (slot id, window, why)
+    floating: list[tuple[str, TrackedWindow, str]] = field(default_factory=list)
+    minimums: dict[str, Size] = field(default_factory=dict)  # window key -> known minimum on this group's monitor
 
 
 class DynamicTiler(QObject):
@@ -106,6 +116,7 @@ class DynamicTiler(QObject):
         self._order: list[str] = []  # all-window tiling: window keys in the order they joined
         self._home: dict[str, str] = {}  # all-window tiling: window key -> monitor device it is tiled on
         self._shown: dict[str, tuple] = {}  # window key -> (minimized, maximized, resizable) last seen
+        self._minimums: dict[str, tuple[int, int, int]] = {}  # window key -> (width, height, at dpi) it insisted on
         self._history: deque[float] = deque()
         self._last_groups: list[Group] = []
         self._preview: Rect | None = None
@@ -169,6 +180,13 @@ class DynamicTiler(QObject):
 
     def float_reason(self, window: TrackedWindow) -> str:
         """Why a window is not tiled by all-window tiling ("" when it is)."""
+        reason = self._excluded(window)
+        if reason:
+            return reason
+        return next((why for group in self._last_groups for _s, w, why in group.floating if w.key == window.key), "")
+
+    def _excluded(self, window: TrackedWindow) -> str:
+        """Why a window cannot take part in all-window tiling at all ("" when it can)."""
         if window.exe_name.lower() in self.exclusions():
             return "floating (you chose so for this program)"
         if not window.resizable:
@@ -214,8 +232,60 @@ class DynamicTiler(QObject):
         workspace_id = self.wm.workspaces.active_id
         if self.manages(workspace_id):
             spec = LayoutSpec.from_dict(self.wm.workspaces.get(workspace_id).layout.to_dict())
-            return [Group(workspace_id, spec, self.tile_set(workspace_id))]
+            return [self._group(workspace_id, spec, self.tile_set(workspace_id), self._monitors())]
         return []
+
+    # -- minimum sizes -------------------------------------------------------------------------------------------
+    def minimum(self, window_key: str, monitor: Monitor) -> Size:
+        """The smallest frame this window accepted so far, in physical pixels of ``monitor`` ((0, 0): none known)."""
+        known = self._minimums.get(window_key)
+        if known is None:
+            return 0, 0
+        width, height, dpi = known
+        return math.ceil(width * monitor.dpi / dpi), math.ceil(height * monitor.dpi / dpi)
+
+    def _learn(self, window_key: str, target: Rect, actual: Rect, monitors: list[Monitor]) -> bool:
+        """A window placed at ``target`` ended up at ``actual``: when it kept the position but stayed larger, that
+        is its minimum size (Windows enforces it from WM_GETMINMAXINFO). True when that is new."""
+        if abs(actual[0] - target[0]) > TOLERANCE or abs(actual[1] - target[1]) > TOLERANCE:
+            return False  # the application put itself somewhere else: that says nothing about its size
+        width, height = actual[2] - actual[0], actual[3] - actual[1]
+        width = width if width > target[2] - target[0] + TOLERANCE else 0
+        height = height if height > target[3] - target[1] + TOLERANCE else 0
+        if not (width or height):
+            return False
+        monitor = monitor_for_rect(target, monitors)
+        if monitor is None:
+            return False
+        old = self.minimum(window_key, monitor)
+        new = (max(width, old[0]), max(height, old[1]))
+        if new == old:
+            return False
+        self._minimums[window_key] = (*new, monitor.dpi)
+        return True
+
+    def _group(self, group_id: str, spec: LayoutSpec, candidates: list[tuple[str, TrackedWindow]],
+               monitors: list[Monitor]) -> Group:
+        """A group of windows laid out together; those whose minimum sizes do not fit beside the others float."""
+        monitor = resolve(spec.monitor, monitors)
+        if monitor is None:
+            return Group(group_id, spec, candidates)
+        sizes = [self.minimum(window.key, monitor) for _s, window in candidates]
+        out = set(overflowing(spec, monitor.work, sizes, monitor.scale)) if any(any(m) for m in sizes) else set()
+        slots = [c for i, c in enumerate(candidates) if i not in out]
+        floating = [(slot, window, self._overflow_note(sizes[i], monitor))
+                    for i, (slot, window) in enumerate(candidates) if i in out]
+        minimums = {window.key: sizes[i] for i, (_s, window) in enumerate(candidates) if i not in out and any(sizes[i])}
+        return Group(group_id, spec, slots, floating, minimums)
+
+    @staticmethod
+    def _overflow_note(size: Size, monitor: Monitor) -> str:
+        need = " × ".join(f"{v} px {what}" for v, what in zip(size, ("wide", "high")) if v)
+        work_w, work_h = monitor.work[2] - monitor.work[0], monitor.work[3] - monitor.work[1]
+        if size[0] > work_w or size[1] > work_h:
+            return (f"floating: it needs at least {need}, more than this monitor's free area ({work_w} × {work_h}), "
+                    "so it cannot be shown completely")
+        return f"floating: it needs at least {need} and does not fit beside the other tiled windows"
 
     def managed_windows(self) -> list[TrackedWindow]:
         """The windows dynamic tiling is in charge of right now (either scope); [] when it is off."""
@@ -240,7 +310,7 @@ class DynamicTiler(QObject):
         monitors = self._monitors()
         if not monitors:
             return []
-        eligible = [w for w in self.wm.tracker.windows() if not self.float_reason(w)]
+        eligible = [w for w in self.wm.tracker.windows() if not self._excluded(w)]
         keys = {w.key for w in eligible}
         self._order = [key for key in self._order if key in keys]
         for window in eligible:
@@ -249,17 +319,20 @@ class DynamicTiler(QObject):
             if window.key not in self._home:
                 monitor = monitor_for_rect(window.rect, monitors) or resolve(None, monitors)
                 self._home[window.key] = monitor.device
-        by_key = {w.key: w for w in eligible}
+        return self._layout_global(self._order, self._home, {w.key: w for w in eligible}, monitors)
+
+    def _layout_global(self, order: list[str], home: dict[str, str], by_key: dict[str, TrackedWindow],
+                       monitors: list[Monitor]) -> list[Group]:
         base = self.global_layout()
         groups = []
         for monitor in monitors:
             # a window whose monitor was unplugged is tiled on the primary one
-            slots = [(key, by_key[key]) for key in self._order
-                     if resolve(MonitorRef(self._home.get(key, "")), monitors).device == monitor.device]
+            slots = [(key, by_key[key]) for key in order if key in by_key
+                     and resolve(MonitorRef(home.get(key, "")), monitors).device == monitor.device]
             if slots:
                 spec = LayoutSpec.from_dict(base.to_dict())
                 spec.monitor = monitor.ref()
-                groups.append(Group(monitor.device, spec, slots))
+                groups.append(self._group(monitor.device, spec, slots, monitors))
         return groups
 
     def _signature_of(self, groups: list[Group]) -> tuple:
@@ -267,7 +340,8 @@ class DynamicTiler(QObject):
         for group in groups:
             layout = group.spec.to_dict()
             layout.pop("free", None)
-            parts.append((group.id, json.dumps(layout, sort_keys=True), tuple((s, w.key) for s, w in group.slots)))
+            parts.append((group.id, json.dumps(layout, sort_keys=True), tuple((s, w.key) for s, w in group.slots),
+                          tuple(w.key for _s, w, _why in group.floating), tuple(sorted(group.minimums.items()))))
         return GLOBAL if self.global_on else self.wm.workspaces.active_id, tuple(parts)
 
     # -- triggers ------------------------------------------------------------------------------------------------
@@ -296,6 +370,7 @@ class DynamicTiler(QObject):
     def _on_removed(self, window: TrackedWindow) -> None:
         self._shown.pop(window.key, None)
         self._home.pop(window.key, None)
+        self._minimums.pop(window.key, None)
         if window.key in self._dragging:
             self._dragging.discard(window.key)
             self._set_preview(None)
@@ -384,30 +459,51 @@ class DynamicTiler(QObject):
         or back to its own tile). None when there is no valid target."""
         own = self._targets.get(slot)
         center = _center(frame)
-        target = next((rect for other, (_g, rect) in self._targets.items()
-                       if other != slot and _center_in(rect, center)), None)
-        if target is not None:
-            return target  # a swap: it takes the other window's tile
+        other = next((other for other, (_g, rect) in self._targets.items()
+                      if other != slot and _center_in(rect, center)), None)
+        if other is not None:
+            return self._simulate(slot, swap=other)  # a swap: the layout with the two exchanged
         if self.global_on:
             monitors = self._monitors()
             monitor = monitor_for_rect(frame, monitors)
             if monitor is None:
                 return None  # off every monitor: nothing to show
             if monitor.device != self._home.get(slot):
-                return self._joined_rect(slot, monitor, monitors)
+                return self._simulate(slot, home=monitor.device)  # it joins that monitor's layout
         return own[1] if own is not None else None
 
-    def _joined_rect(self, slot: str, monitor: Monitor, monitors: list[Monitor]) -> Rect | None:
-        """Its tile in ``monitor``'s layout once it belongs there (the order of joining decides its place)."""
-        from cirana.wm.layout import tile
-
-        tiled = {key for group in self._last_groups for key, _w in group.slots}
-        members = [key for key in self._order if key in tiled and (
-            key == slot or resolve(MonitorRef(self._home.get(key, "")), monitors).device == monitor.device)]
-        if slot not in members:
-            return None
-        spec = self.global_layout()
-        return tile(spec, monitor.work, len(members), monitor.scale)[members.index(slot)]
+    def _simulate(self, slot: str, swap: str | None = None, home: str | None = None) -> Rect | None:
+        """The tile ``slot`` gets in the layout as it will be after the drop (the same planning as the re-tile,
+        minimum sizes included). None: it would float."""
+        monitors = self._monitors()
+        if self.global_on:
+            order, homes = list(self._order), dict(self._home)
+            if swap is not None and slot in order and swap in order:
+                i, j = order.index(slot), order.index(swap)
+                order[i], order[j] = order[j], order[i]
+                homes[slot], homes[swap] = homes.get(swap, ""), homes.get(slot, "")
+            if home is not None:
+                homes[slot] = home
+            windows = {w.key: w for g in self._last_groups for w in [w for _s, w in g.slots]
+                       + [w for _s, w, _why in g.floating]}
+            groups = self._layout_global(order, homes, windows, monitors)
+        else:
+            group = next(iter(self._last_groups), None)
+            if group is None:
+                return None
+            candidates = list(self.tile_set(group.id))
+            ids = [s for s, _w in candidates]
+            if swap is not None and slot in ids and swap in ids:
+                i, j = ids.index(slot), ids.index(swap)
+                candidates[i], candidates[j] = candidates[j], candidates[i]
+            groups = [self._group(group.id, group.spec, candidates, monitors)]
+        for group in groups:
+            ids = [s for s, _w in group.slots]
+            if slot in ids:
+                monitor = resolve(group.spec.monitor, monitors)
+                sizes = [group.minimums.get(w.key, (0, 0)) for _s, w in group.slots]
+                return tile(group.spec, monitor.work, len(ids), monitor.scale, sizes)[ids.index(slot)]
+        return None
 
     def _dropped(self, slot: str, window: TrackedWindow) -> None:
         try:
@@ -481,7 +577,7 @@ class DynamicTiler(QObject):
 
         def job(cancel):  # noqa: ANN001 - worker thread
             monitors = backend.monitors()
-            planned, refused, usable_all = [], [], []
+            planned, refused, usable_all, floats = [], [], [], []
             for group in groups:
                 usable = []
                 for slot, window in group.slots:
@@ -491,14 +587,23 @@ class DynamicTiler(QObject):
                     else:
                         refused.append((slot, problem))
                 usable_all += [window for _s, window in usable]
-                planned += [(group.id, slot, p) for slot, p in plan_layout(group.spec, usable, monitors)]
-            results = controller.place_all([p for _g, _s, p in planned], cancel)
+                planned += [(group.id, slot, p) for slot, p in
+                            plan_layout(group.spec, usable, monitors, minimums=group.minimums)]
+                monitor = resolve(group.spec.monitor, monitors)
+                for slot, window, _why in group.floating:  # too large to tile: only made completely visible
+                    if monitor is None or controller.check(window) is not None or backend.is_minimized(window.hwnd):
+                        continue
+                    frame = backend.frame_rect(window.hwnd)
+                    if keep_visible(monitor.work, frame) != frame:
+                        floats.append((slot, Placement(window, keep_visible(monitor.work, frame))))
+            results = controller.place_all([p for _g, _s, p in planned] + [p for _s, p in floats], cancel)
             if raise_group and not cancel.is_set():
                 front = raise_group if isinstance(raise_group, list) else usable_all
                 if front:
                     controller.bring_to_front(front)
             targets = [(slot, (group_id, p.rect)) for group_id, slot, p in planned]
-            return targets, list(zip([slot for _g, slot, _p in planned], results)) + refused
+            tiled = list(zip([slot for _g, slot, _p in planned], results)) + refused
+            return targets, tiled, list(zip([slot for slot, _p in floats], results[len(planned):]))
 
         self._job = run_async(job, lambda outcome: self._done(scope, generation, outcome),
                               lambda error: self._failed(generation, error))
@@ -509,17 +614,22 @@ class DynamicTiler(QObject):
             log.warning("Dynamic tiling failed: %s", error)
 
     def _done(self, scope: str, generation: int,
-              outcome: tuple[list[tuple[str, tuple[str, Rect]]], list[tuple[str, Result]]]) -> None:
+              outcome: tuple[list[tuple[str, tuple[str, Rect]]], list[tuple[str, Result]],
+                             list[tuple[str, Result]]]) -> None:
         if generation != self._generation or not self.in_charge() or scope != self._scope():
             return  # superseded, cancelled, or the scope changed meanwhile
         self._job = None
-        targets, results = outcome
+        targets, results, floated = outcome
         self._targets = dict(targets)
-        changed, problems = False, []
+        changed, problems, learned = False, [], False
+        monitors = self._monitors()
         for slot, result in results:
             if result.status is Status.DENIED and result.key not in self._denied:
                 self._denied.add(result.key)  # left out from now on: the others take its space
                 self.schedule(force=True)
+            if result.status is Status.CONSTRAINED and result.actual is not None and slot in self._targets:
+                # larger than its tile: its minimum size. The next layout makes room for it (or floats it).
+                learned = self._learn(result.key, self._targets[slot][1], result.actual, monitors) or learned
             if scope != GLOBAL:
                 message = "" if result.status is Status.PLACED else result.message
                 changed = self.wm.set_entry_message(scope, slot, message) or changed
@@ -528,6 +638,19 @@ class DynamicTiler(QObject):
                 self._reported.add((result.key, result.status.value))
                 if not result.ok:
                     problems.append(result.message)
+        for group in self._last_groups:
+            for slot, window, why in group.floating:
+                if scope != GLOBAL:
+                    changed = self.wm.set_entry_message(scope, slot, f"{window.display_title}: {why}.") or changed
+                if (window.key, why) not in self._reported:
+                    self._reported.add((window.key, why))
+                    problems.append(f"{window.display_title}: {why}.")
+        for _slot, result in floated:
+            if not result.ok and (result.key, result.status.value) not in self._reported:
+                self._reported.add((result.key, result.status.value))
+                problems.append(result.message)
+        if learned:
+            self.schedule()  # the minimums are part of the signature: one more round, with room for them
         if problems:
             self.wm.message.emit(" ".join(problems))
         if changed:

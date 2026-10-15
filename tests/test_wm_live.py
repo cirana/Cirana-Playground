@@ -401,3 +401,40 @@ class LiveOverlayTests(unittest.TestCase):
         self.assertTrue(out["preview_hidden"])
         self.assertFalse(out["foreground_is_overlay"])
         self.assertTrue(out["cleared"])
+
+
+@unittest.skipUnless(LIVE, "live desktop test: set CIRANA_LIVE=1")
+class LiveMinimumSizeTests(unittest.TestCase):
+    """Real windows with a minimum size (WM_GETMINMAXINFO of CIRANA's own helper): room is made for them, nothing
+    sticks out under a neighbour or off the screen, and a window larger than the monitor floats with its top-left
+    corner on the screen."""
+
+    def test_minimum_sizes_on_the_real_desktop(self):
+        import json
+
+        home = tempfile.mkdtemp(prefix="cirana-live-minimum-")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
+        done = subprocess.run([sys.executable, "-m", "tests.live_minimum_script", home], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        out = json.loads(done.stdout.strip().splitlines()[-1])
+        work = out["work"]
+        for rows in (out["tiled"], out["with_huge"][:3]):
+            frames = [row["frame"] for row in rows]
+            for i, (row, frame) in enumerate(zip(rows, frames)):
+                self.assertEqual(row["reason"], "")
+                self.assertLessEqual(max(abs(x - y) for x, y in zip(frame, row["target"])), 2, row)  # placed
+                self.assertTrue(work[0] <= frame[0] and frame[2] <= work[2] and frame[3] <= work[3], row)
+                # GetWindowRect, DWM frame bounds and the client area agree (same physical pixel space)
+                self.assertTrue(0 <= (frame[2] - frame[0]) - row["client"][0] <= 4, row)
+                for other in frames[i + 1:]:
+                    self.assertTrue(frame[2] <= other[0] or other[2] <= frame[0], (frame, other))  # no overlap
+        self.assertGreater(out["tiled"][0]["frame"][2] - out["tiled"][0]["frame"][0], 1000)  # its 900 logical px
+        self.assertLessEqual(out["count"], 3)  # one round, one with room for the minimum: no loop
+        huge = out["with_huge"][3]
+        self.assertIn("cannot be shown completely", huge["reason"])
+        self.assertIsNone(huge["target"])
+        self.assertEqual(huge["frame"][0], work[0])  # its left edge (and title bar) on the screen
+        self.assertTrue(work[1] <= huge["frame"][1] and huge["frame"][3] <= work[3])
+        self.assertEqual(len(out["messages"]), 1)

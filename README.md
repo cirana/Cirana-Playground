@@ -155,6 +155,17 @@ own frameless tool windows, transparent for mouse and keyboard, never activated,
 entry, and invisible to the window tracker; only they are positioned (in physical pixels), never the applications.
 At fractional scaling Qt may round an overlay's size by one pixel.
 
+**Minimum sizes.** Many applications refuse to become smaller than a minimum (they answer `WM_GETMINMAXINFO`).
+Windows then keeps the left / top edge CIRANA asked for and lets the window grow to the right and down, so part of
+it ends up under its neighbour or off the screen and its content looks cut off on the right or bottom. CIRANA never
+asks another application for its minimum (no message is sent to it); it learns it from what the controller reads back
+(`Status.CONSTRAINED`: same position, larger frame), remembers it per window and DPI, and lays the monitor out again
+with every tile at least that large (`wm/layout.py`: `tile(..., minimums)`, the others share the rest by weight).
+When the minimums cannot fit beside each other, the newest window with a minimum *floats*: it is moved (never
+shrunk) so that it is completely on the screen, or with its top-left corner on the screen when it is larger than the
+monitor, and the reason is shown on its row and reported once. The drop preview uses the same planning. What an
+application draws inside a window of the size it accepted is up to the application.
+
 **One workspace.** A per-workspace switch (*Dynamic tiling* in the layout panel, stored with the layout as `"dynamic"`; records written
 before it existed read as off). While it is on **and** the workspace is the active one, its tiled layout (side by
 side, main + side panel, grids) follows its windows by itself:
@@ -177,8 +188,8 @@ side, main + side panel, grids) follows its windows by itself:
 * **Only reliable windows** take part: those bound to an entry unambiguously (or by your choice). Unrelated windows
   and windows several entries could claim are never touched. A recycled handle is never moved.
 * Windows Windows will not let CIRANA move (higher rights) are left out so the others fill the screen, a hung window
-  is skipped for that round, fixed-size and minimum-size windows keep their size; each problem shows on its row and
-  is reported once. Multi-monitor and DPI handling are the same as for *Apply layout*.
+  is skipped for that round, fixed-size windows keep their size, minimum-size windows get room or float (see
+  *Minimum sizes*); each problem shows on its row and is reported once. Multi-monitor and DPI handling are the same as for *Apply layout*.
 * Every re-tile is a cancellable worker job with a generation; switching workspace, a drag, a newer re-tile or
   quitting drops it and its late result. With tiling off, *Apply layout* and activation behave exactly as before;
   with it on, *Apply layout* re-tiles over the windows that are actually there. When CIRANA closes, windows stay put.

@@ -57,9 +57,11 @@ class EntryStatus:
 
 
 def plan_layout(spec: LayoutSpec, slots: list[tuple[str, TrackedWindow | None]], monitors: list[Monitor],
-                only: set[str] | None = None) -> list[tuple[str, Placement]]:
+                only: set[str] | None = None, minimums: dict[str, tuple[int, int]] | None = None,
+                ) -> list[tuple[str, Placement]]:
     """Where each window goes. ``slots``: (entry id, window or None) in workspace order; a None window keeps its
-    place free (an application still starting). Free layouts only move windows with a saved slot."""
+    place free (an application still starting). Free layouts only move windows with a saved slot. ``minimums``:
+    window key -> known minimum frame size (physical pixels on the layout's monitor), honoured by tiled layouts."""
     if not monitors:
         return []
     placements = []
@@ -73,7 +75,8 @@ def plan_layout(spec: LayoutSpec, slots: list[tuple[str, TrackedWindow | None]],
                                                    slot.maximized)))
         return placements
     monitor = resolve(spec.monitor, monitors)
-    rects = tile(spec, monitor.work, len(slots), monitor.scale)
+    sizes = [minimums.get(window.key, (0, 0)) if window is not None else (0, 0) for _e, window in slots]         if minimums else None
+    rects = tile(spec, monitor.work, len(slots), monitor.scale, sizes)
     for (entry_id, window), rect in zip(slots, rects):
         if window is not None and (only is None or entry_id in only):
             placements.append((entry_id, Placement(window, rect)))

@@ -1,9 +1,11 @@
 """A tiny REAL Win32 window with its own message loop that can be told to stop responding (for the live tests).
 
-    python -m tests.hang_window_helper <trigger file> <hang seconds>
+    python -m tests.hang_window_helper <trigger file> <hang seconds> [<min width>x<min height>]
 
 Prints ``READY <hwnd>`` once the window exists. When the trigger file appears, the message loop is blocked for the
 given number of seconds (the window turns "not responding"), then it carries on. WM_CLOSE closes it normally.
+With a minimum size the window answers WM_GETMINMAXINFO with it (ptMinTrackSize, in its own pixels), as many
+applications do: Windows then refuses to make it any smaller, also when CIRANA asks for it.
 """
 import ctypes
 import os
@@ -16,7 +18,7 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 LRESULT = ctypes.c_ssize_t
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
-WM_DESTROY, WM_CLOSE = 0x0002, 0x0010
+WM_DESTROY, WM_CLOSE, WM_GETMINMAXINFO = 0x0002, 0x0010, 0x0024
 WS_OVERLAPPEDWINDOW, WS_VISIBLE = 0x00CF0000, 0x10000000
 PM_REMOVE = 1
 
@@ -29,6 +31,12 @@ class WNDCLASSW(ctypes.Structure):
     ]
 
 
+class MINMAXINFO(ctypes.Structure):
+    _fields_ = [("ptReserved", wintypes.POINT), ("ptMaxSize", wintypes.POINT), ("ptMaxPosition", wintypes.POINT),
+                ("ptMinTrackSize", wintypes.POINT), ("ptMaxTrackSize", wintypes.POINT)]
+
+
+MIN_SIZE = (0, 0)
 user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.DefWindowProcW.restype = LRESULT
 user32.CreateWindowExW.argtypes = [
@@ -53,11 +61,18 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     if msg == WM_DESTROY:
         user32.PostQuitMessage(0)
         return 0
+    if msg == WM_GETMINMAXINFO and MIN_SIZE != (0, 0):
+        info = ctypes.cast(lparam, ctypes.POINTER(MINMAXINFO)).contents
+        info.ptMinTrackSize.x, info.ptMinTrackSize.y = MIN_SIZE
+        return 0
     return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
 
 def main() -> None:
+    global MIN_SIZE
     trigger, hang_seconds = sys.argv[1], float(sys.argv[2])
+    if len(sys.argv) > 3:
+        MIN_SIZE = tuple(int(v) for v in sys.argv[3].lower().split("x"))
     instance = kernel32.GetModuleHandleW(None)
     window_class = WNDCLASSW()
     window_class.lpfnWndProc = wnd_proc

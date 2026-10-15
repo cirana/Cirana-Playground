@@ -323,10 +323,11 @@ class MonitorTests(TilingEnv):
     def test_minimum_size_is_kept(self):
         self.tiled_workspace("Code", "Notes")
         code = self.open("Code", min_size=(1500, 300))
-        self.open("Notes")
+        notes = self.open("Notes")
         self.settle()
         self.assertEqual(code.rect[2] - code.rect[0], 1500)
-        self.assertIn("minimum size", self.wm.statuses(self.manager.active_id)[0].message)
+        self.assertEqual(notes.rect, (1500, 0, 2000, 960))  # the layout made room for it (tests.test_minimum_sizes)
+        self.assertEqual(self.wm.statuses(self.manager.active_id)[0].message, "")
 
 
 class SettingTests(TilingEnv):
