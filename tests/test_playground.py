@@ -436,6 +436,8 @@ class PlaygroundUiTests(unittest.TestCase):
             mock.patch.object(playground, "snapshot_handles", return_value=set()),
             mock.patch.object(playground, "wait_for_app_window", side_effect=self.fake_wait),
             mock.patch.object(playground, "windows_of_executable", return_value=[]),
+            # the fake pid 4242 may name a real process: never treat it as the hosted application's process
+            mock.patch.object(playground, "process_started", return_value=0.0),
         ]
         for patch in patches:
             patch.start()
@@ -962,6 +964,145 @@ class PlaygroundUiTests(unittest.TestCase):
         self.assertFalse(self.view.detach_button.isVisible())
         self.assertFalse(self.view.close_app_button.isVisible())
         self.assertFalse(self.view.warn_button.isVisible())
+
+    # -- lost windows: verified reconnection, safe mode, bounded retries ----------------------------
+    def lose(self, session, reason="closed", unstable=False):
+        """What the host's liveness check does when the window is gone; ``unstable``: right after it was hosted."""
+        from cirana.widgets.native_host import OBSERVE_SECONDS
+
+        host = self.view._pages[session.id].host
+        host._attached_at = time.monotonic() - (0.0 if unstable else OBSERVE_SECONDS + 1)
+        host._lose(reason)
+
+    def replace_with(self, results):
+        """The replacement search answers with ``results`` in turn (the identity check of the process passes)."""
+        return [mock.patch.object(playground, "process_started", return_value=111.0),
+                mock.patch.object(playground, "find_replacement_window", side_effect=list(results))]
+
+    def hosted(self, name):
+        session = self.open(self.add_app(name))
+        session.process_created = 111.0
+        return session
+
+    def test_replaced_window_is_reconnected_after_verification(self):
+        session = self.hosted("Phoenix")
+        new = WindowInfo(0x7700, 4242, 1, "Fake window", "Cls", session.exe)
+        old_hwnd = session.hwnd
+        identity, find = self.replace_with([new])
+        with identity, find as search:
+            self.lose(session)
+            self.assertEqual(session.state, SessionState.LAUNCHING)
+            self.assertIn("reconnecting", session.message)
+            self.assertTrue(self.pump(until=lambda: session.state is SessionState.EMBEDDED))
+        self.assertEqual(search.call_args.args[1], old_hwnd)  # the lost window is never a candidate itself
+        self.assertEqual(session.hwnd, 0x7700)
+        self.assertFalse(session.safe_mode)  # a loss long after hosting is no compatibility failure
+        self.assertTrue(any("replaced its window" in text for text in session.warnings))
+        self.assertEqual(self.view._pages[session.id].host.embedded.hwnd, 0x7700)
+
+    def test_window_unstable_in_child_mode_is_docked_from_then_on(self):
+        from cirana.native.window_restorer import WindowState
+
+        session = self.hosted("Wobbly")
+        docked = []
+
+        def fake_dock(info, host_hwnd, launched_by_cirana):
+            docked.append(info.hwnd)
+            state = WindowState(info.hwnd, 0, 0, 0, (0, 0, 100, 100), False, False)
+            return embedder.EmbedResult(embedder.EmbedStatus.OK, warnings=[embedder.DOCKED_NOTE]), \
+                embedder.EmbeddedWindow(info.hwnd, host_hwnd, state, info.pid, launched_by_cirana, mode=embedder.DOCKED)
+
+        identity, find = self.replace_with([WindowInfo(session.hwnd, 4242, 1, "Fake window", "Cls", session.exe)])
+        with identity, find as search, mock.patch.object(embedder, "dock", side_effect=fake_dock), \
+                mock.patch.object(embedder, "place_docked"), mock.patch.object(embedder, "keep_docked_above"), \
+                mock.patch.object(embedder, "send_docked_behind"), mock.patch.object(embedder, "show_docked"):
+            self.lose(session, "escaped", unstable=True)  # it left the host right after being placed there
+            self.assertTrue(self.pump(until=lambda: session.state is SessionState.EMBEDDED))
+            self.assertEqual(docked, [session.hwnd])
+            self.assertNotIn(session.hwnd, search.call_args.args[3])  # the escaped window itself may be taken
+            self.assertTrue(session.docked and session.safe_mode)
+            self.assertTrue(any("safe mode" in text for text in session.warnings))
+            self.assertEqual(self.ctx.settings.playground_store.load()["embedded"], [])  # docked: no crash record
+            later = playground.PlaygroundSession(id="x", app_id="", title="Wobbly", exe=session.exe)
+            self.assertTrue(self.manager.dock_only(later))  # the same program is docked right away next time
+            self.view.close_tab(session.id)
+
+    def test_reconnecting_stops_after_repeated_failures(self):
+        session = self.hosted("Flicker")
+        windows = [WindowInfo(0x7800 + i, 4242, 1, "Fake window", "Cls", session.exe)
+                   for i in range(playground.MAX_RECONNECTS)]
+        identity, find = self.replace_with(windows)
+        with identity, find as search, mock.patch.object(embedder, "dock", side_effect=self.fake_embed_as_dock):
+            for _ in windows:
+                self.lose(session, unstable=True)
+                self.assertTrue(self.pump(until=lambda: session.state is SessionState.EMBEDDED))
+            self.lose(session, unstable=True)  # lost right away once more: no endless loop
+        self.assertEqual(search.call_count, playground.MAX_RECONNECTS)
+        self.assertEqual(session.state, SessionState.EXTERNAL)  # it still runs: left as a normal window
+        self.assertIn("stopped reconnecting", session.message)
+
+    def fake_embed_as_dock(self, info, host_hwnd, launched_by_cirana):  # safe mode docks: keep it a fake child
+        return self.fake_embed(info, host_hwnd, 10, 10, launched_by_cirana)
+
+    def test_ended_process_is_closed_without_a_search(self):
+        session = self.hosted("Gone")
+        with mock.patch.object(playground, "process_started", return_value=0.0), \
+                mock.patch.object(playground, "find_replacement_window") as search:
+            self.lose(session)
+        search.assert_not_called()
+        self.assertEqual(session.state, SessionState.CLOSED)
+        self.assertEqual(session.message, "Gone closed its window.")
+
+    def test_uncertain_replacement_is_not_taken(self):
+        session = self.hosted("Twins")
+        identity, find = self.replace_with([playground.NoWindow("It opened 2 new windows; CIRANA cannot tell.")])
+        with identity, find:
+            self.lose(session)
+            self.assertTrue(self.pump(until=lambda: session.state is not SessionState.LAUNCHING))
+        self.assertEqual(session.state, SessionState.EXTERNAL)
+        self.assertIn("cannot tell", session.message)
+        self.assertIsNone(self.view._pages[session.id].host.embedded)
+
+    def test_a_window_hosted_in_another_tab_is_never_taken(self):
+        first, second = self.hosted("Holder"), self.hosted("Seeker")
+        identity, find = self.replace_with([WindowInfo(first.hwnd, 4242, 1, "Fake window", "Cls", second.exe)])
+        with identity, find, mock.patch.object(embedder, "embed_or_dock") as attach:
+            self.lose(second)
+            self.assertTrue(self.pump(until=lambda: second.state is not SessionState.LAUNCHING))
+        attach.assert_not_called()
+        self.assertEqual(second.state, SessionState.EXTERNAL)
+        self.assertIn("already hosted in another tab", second.message)
+        self.assertEqual(first.state, SessionState.EMBEDDED)
+        self.assertEqual(self.view._pages[first.id].host.embedded.hwnd, first.hwnd)
+
+    def test_no_replacement_search_while_another_application_opens(self):
+        session = self.hosted("Quiet")
+        opening = self.manager._new_session(None, "", launched_by_cirana=True, title="Opening")  # LAUNCHING
+        self.addCleanup(self.manager.remove_session, opening.id)
+        with mock.patch.object(playground, "process_started", return_value=111.0), \
+                mock.patch.object(playground, "find_replacement_window") as search:
+            self.lose(session)
+        search.assert_not_called()  # its new window could be taken for the replacement
+        self.assertEqual(session.state, SessionState.CLOSED)
+
+    def test_closing_the_tab_cancels_the_reconnection(self):
+        session = self.hosted("Late")
+        released = threading.Event()
+
+        def slow_search(session_, old_hwnd, escaped, exclude, cancel, **_kw):
+            cancel.wait(5)
+            released.set()
+            return WindowInfo(0x7900, 4242, 1, "Fake window", "Cls", session_.exe)  # too late: must be dropped
+
+        with mock.patch.object(playground, "process_started", return_value=111.0), \
+                mock.patch.object(playground, "find_replacement_window", side_effect=slow_search), \
+                mock.patch.object(embedder, "embed_or_dock") as attach:
+            self.lose(session)
+            self.view.close_tab(session.id)
+            self.assertTrue(released.wait(5))
+            self.pump(0.2)
+        attach.assert_not_called()
+        self.assertIsNone(self.manager.get(session.id))
 
     def test_middle_click_detaches_instead_of_closing(self):
         session = self.open(self.add_app("Tau"))

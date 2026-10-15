@@ -90,6 +90,11 @@ class EmbedResult:
     status: EmbedStatus
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
+    # FAILED only: False when the window could not verifiably be put back as it was (e.g. a hung application whose
+    # restore is still pending). Nothing else may then be tried on it.
+    rolled_back: bool = True
+    # FAILED, not rolled back: the window, which may still be parented to the host (see NativeHost.restore_pending).
+    stranded: EmbeddedWindow | None = None
 
     @property
     def ok(self) -> bool:
@@ -111,6 +116,30 @@ class EmbeddedWindow:
         return self.mode == DOCKED
 
 
+def higher_rights(pid: int) -> bool | None:
+    """True when the process's integrity level is above CIRANA's: Windows (UIPI) then refuses every change to its
+    windows (measured: styles, parent, position and show state all fail with Win32 error 5). None: unknown."""
+    theirs, ours = w.process_integrity(pid), w.process_integrity(own_pid())
+    if theirs is None or ours is None:
+        return None
+    return theirs > ours
+
+
+def _rights_problem(pid: int) -> tuple[str, bool]:
+    """(reason the window cannot be changed, or ''; whether its rights could not be inspected at all)."""
+    higher = higher_rights(pid)
+    elevated = w.process_is_elevated(pid)
+    if higher is None and elevated:  # the integrity level is unreadable, but the token says administrator
+        higher = not w.process_is_elevated(own_pid())
+    if higher:
+        if elevated:
+            return ("The application runs with administrator rights; Windows (UIPI) does not let a normal-rights "
+                    "CIRANA change or move its window."), False
+        return ("The application runs with higher rights than CIRANA (a higher integrity level, e.g. an "
+                "accessibility or system tool); Windows (UIPI) blocks CIRANA from changing its window."), False
+    return "", higher is None and elevated is None
+
+
 def check_compatibility(info: WindowInfo) -> EmbedResult:
     """Cheap, side-effect-free checks run before re-parenting a foreign window (child mode)."""
     warnings: list[str] = []
@@ -126,13 +155,10 @@ def check_compatibility(info: WindowInfo) -> EmbedResult:
             "Packaged (Microsoft Store / WinUI) applications crash when their window is re-parented. "
             "Verified on this system: Windows 11 Notepad 11.2607 terminates about two seconds after SetParent.",
         )
-    elevated = w.process_is_elevated(info.pid)
-    if elevated:
-        return EmbedResult(
-            EmbedStatus.BLOCKED,
-            "The application runs with administrator rights; Windows (UIPI) blocks a normal-rights CIRANA from hosting it.",
-        )
-    if elevated is None:
+    refused, unknown = _rights_problem(info.pid)
+    if refused:
+        return EmbedResult(EmbedStatus.BLOCKED, refused)
+    if unknown:
         warnings.append("Could not inspect the application's privilege level; embedding may be refused by Windows.")
     if w.IsHungAppWindow(info.hwnd):
         return EmbedResult(EmbedStatus.BLOCKED, "The application is not responding.")
@@ -155,34 +181,63 @@ def embed(info: WindowInfo, host_hwnd: int, width: int, height: int, launched_by
     if state.maximized or state.minimized:
         w.ShowWindow(hwnd, w.SW_RESTORE)  # a maximized/minimized window has no meaningful child geometry
     try:
+        # Every step is checked before the next one runs: a refused style change must not be followed by SetParent.
         # SetParent remarks: when making a top-level window a child, set WS_CHILD / clear WS_POPUP *before* SetParent.
         style = int(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE)) & 0xFFFFFFFF
         style = (style & ~_FRAME_STYLES) | w.WS_CHILD | w.WS_VISIBLE | w.WS_CLIPSIBLINGS | w.WS_CLIPCHILDREN
-        ctypes.set_last_error(0)
-        w.SetWindowLongPtrW(hwnd, w.GWL_STYLE, style)
-        style_error = ctypes.get_last_error()
+        _set_long(hwnd, w.GWL_STYLE, style, "Changing the window style")
         # A window that asks for its own taskbar button keeps one in some shells even as a child: drop the request
         # while it is hosted. The captured ex-style (with WS_EX_APPWINDOW) is put back by restore_state.
         if state.ex_style & w.WS_EX_APPWINDOW:
-            w.SetWindowLongPtrW(hwnd, w.GWL_EXSTYLE, state.ex_style & ~w.WS_EX_APPWINDOW)
+            _set_long(hwnd, w.GWL_EXSTYLE, state.ex_style & ~w.WS_EX_APPWINDOW, "Changing the extended window style")
         ctypes.set_last_error(0)
         w.SetParent(hwnd, host_hwnd)
         error = ctypes.get_last_error()
         if int(w.GetParent(hwnd) or 0) != host_hwnd:
-            raise OSError(
-                error,
-                f"SetParent was refused (Win32 error {error}; style error {style_error}; "
-                f"app window valid={bool(w.IsWindow(hwnd))}, host valid={bool(w.IsWindow(host_hwnd))}).",
-            )
+            if not w.IsWindow(hwnd):
+                error = w.ERROR_INVALID_WINDOW_HANDLE
+            raise OSError(error, f"SetParent was refused. {w.explain_error(error, higher_rights(info.pid))}")
         w.SetWindowPos(hwnd, None, 0, 0, width, height,
                        w.SWP_NOZORDER | w.SWP_NOACTIVATE | w.SWP_FRAMECHANGED | w.SWP_SHOWWINDOW | w.SWP_ASYNCWINDOWPOS)
     except OSError as exc:
         log.warning("Embedding %s (%s) failed: %s", info.exe_name, info.class_name, exc)
         restore_state(state)
-        return EmbedResult(EmbedStatus.FAILED, str(exc), compat.warnings), None
+        reason = exc.strerror or str(exc)
+        if not w.IsWindow(hwnd) or is_restored(state):  # (a closed window has nothing left to restore)
+            return EmbedResult(EmbedStatus.FAILED, reason, compat.warnings), None
+        log.warning("%s (%#x) could not be fully restored after the failed embedding", info.exe_name, hwnd)
+        stranded = EmbeddedWindow(hwnd, host_hwnd, state, info.pid, launched_by_cirana)
+        return EmbedResult(EmbedStatus.FAILED, reason + " CIRANA could not verify that the window is back as it was; "
+                           "it was left alone.", compat.warnings, rolled_back=False, stranded=stranded), None
 
     embedded = EmbeddedWindow(hwnd, host_hwnd, state, info.pid, launched_by_cirana)
     return EmbedResult(EmbedStatus.OK, warnings=compat.warnings), embedded
+
+
+def _set_long(hwnd: int, index: int, value: int, what: str) -> None:
+    """SetWindowLongPtrW that raises when Windows refuses. It returns the previous value, so 0 alone is no error;
+    0 together with a last error is (e.g. 5 under UIPI)."""
+    ctypes.set_last_error(0)
+    previous = w.SetWindowLongPtrW(hwnd, index, value)
+    error = ctypes.get_last_error()
+    if not previous and error:
+        pid = w.window_pid(hwnd)[0]
+        raise OSError(error, f"{what} was refused. {w.explain_error(error, higher_rights(pid) if pid else None)}")
+
+
+# What embed() changes on the window (the show state aside): its parent, these style bits and WS_EX_APPWINDOW.
+_CHANGED_STYLES = (_FRAME_STYLES | w.WS_CHILD) & ~(w.WS_MINIMIZE | w.WS_MAXIMIZE)
+
+
+def is_restored(state: WindowState) -> bool:
+    """True when the window is verifiably back as captured in everything CIRANA changes: its parent, its frame /
+    child styles and WS_EX_APPWINDOW. GetParent / GetWindowLongPtr send nothing, so this is safe on a hung app."""
+    hwnd = state.hwnd
+    if not w.IsWindow(hwnd) or int(w.GetParent(hwnd) or 0) != state.parent:
+        return False
+    style = int(w.GetWindowLongPtrW(hwnd, w.GWL_STYLE)) & 0xFFFFFFFF
+    ex_style = int(w.GetWindowLongPtrW(hwnd, w.GWL_EXSTYLE)) & 0xFFFFFFFF
+    return not (style ^ state.style) & _CHANGED_STYLES and not (ex_style ^ state.ex_style) & w.WS_EX_APPWINDOW
 
 
 # -- docked mode ------------------------------------------------------------------------------------------
@@ -194,13 +249,19 @@ def dock_compatibility(info: WindowInfo) -> EmbedResult:
         return EmbedResult(EmbedStatus.BLOCKED, "That window belongs to CIRANA itself.")
     if info.class_name in NEVER_HOSTED_CLASSES:
         return EmbedResult(EmbedStatus.BLOCKED, "The desktop and the taskbar cannot be hosted.")
-    if w.process_is_elevated(info.pid):
-        return EmbedResult(
-            EmbedStatus.BLOCKED,
-            "The application runs with administrator rights; Windows (UIPI) does not let a normal-rights CIRANA move it.",
-        )
+    refused, _unknown = _rights_problem(info.pid)
+    if refused:
+        return EmbedResult(EmbedStatus.BLOCKED, refused)
     if w.IsHungAppWindow(info.hwnd):
         return EmbedResult(EmbedStatus.BLOCKED, "The application is not responding.")
+    # Docking only ever moves the window, so ask Windows whether that is allowed, with a move that changes nothing
+    # (posted: never waits for the application). Under UIPI it fails at once with error 5.
+    ctypes.set_last_error(0)
+    if not w.SetWindowPos(info.hwnd, None, 0, 0, 0, 0, w.SWP_NOMOVE | w.SWP_NOSIZE | w.SWP_NOZORDER | w.SWP_NOACTIVATE
+                          | w.SWP_NOOWNERZORDER | w.SWP_ASYNCWINDOWPOS):
+        error = ctypes.get_last_error()
+        return EmbedResult(EmbedStatus.BLOCKED, "CIRANA is not allowed to move this window. "
+                           + w.explain_error(error, higher_rights(info.pid)))
     return EmbedResult(EmbedStatus.OK, warnings=[DOCKED_NOTE])
 
 
@@ -220,6 +281,25 @@ def dock(info: WindowInfo, host_hwnd: int, launched_by_cirana: bool) -> tuple[Em
         or bool(int(w.GetWindowLongPtrW(info.hwnd, w.GWL_EXSTYLE)) & w.WS_EX_APPWINDOW)
     embedded.taskbar_hidden = has_button and taskbar.hide_button(info.hwnd)
     return EmbedResult(EmbedStatus.OK, warnings=compat.warnings), embedded
+
+
+def embed_or_dock(info: WindowInfo, host_hwnd: int, width: int, height: int,
+                  launched_by_cirana: bool) -> tuple[EmbedResult, EmbeddedWindow | None]:
+    """Child mode, with docking as the fallback when Windows refuses it.
+
+    The fallback runs only after the failed attempt was verifiably undone (``rolled_back``): a window left half
+    changed is never touched again. Docking re-checks on its own whether CIRANA may move the window at all; when it
+    may not either (UIPI), the window stays a normal window and the result says why both failed."""
+    result, embedded = embed(info, host_hwnd, width, height, launched_by_cirana)
+    if embedded is not None or result.status is not EmbedStatus.FAILED or not result.rolled_back:
+        return result, embedded
+    docked, embedded = dock(info, host_hwnd, launched_by_cirana)
+    if embedded is None:
+        return EmbedResult(EmbedStatus.FAILED, f"{result.reason} Docking it over the tab was not possible either: "
+                           f"{docked.reason}", result.warnings), None
+    note = f"It could not be placed inside the tab, so it was docked over the tab instead. {result.reason}"
+    log.info("%s (%s): child mode failed, docked instead: %s", info.exe_name, info.class_name, result.reason)
+    return EmbedResult(EmbedStatus.OK, warnings=[note, *docked.warnings]), embedded
 
 
 def _docked_ours(embedded: EmbeddedWindow) -> bool:
@@ -331,6 +411,19 @@ def is_still_embedded(embedded: EmbeddedWindow) -> bool:
     if embedded.docked:
         return _docked_ours(embedded)
     return is_alive(embedded) and int(w.GetParent(embedded.hwnd) or 0) == embedded.host
+
+
+def is_top_level(hwnd: int) -> bool:
+    return int(w.GetAncestor(hwnd, w.GA_PARENT) or 0) == int(w.GetDesktopWindow() or 0)
+
+
+def give_back_escaped(embedded: EmbeddedWindow) -> bool:
+    """A child-mode window that left the host on its own still carries CIRANA's changes (WS_CHILD, no frame). Put
+    them back when it is now a top-level window of the same process; a window the application moved into one of its
+    own windows is left alone. True when it was given back."""
+    if embedded.docked or not _docked_ours(embedded) or not is_top_level(embedded.hwnd):
+        return False
+    return restore_state(embedded.state)
 
 
 def focus(embedded: EmbeddedWindow) -> None:

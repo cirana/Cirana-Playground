@@ -33,7 +33,8 @@ from cirana.native import taskbar
 from cirana.native import win32_api as w
 from cirana.native import window_embedder as embedder
 from cirana.native.window_discovery import (
-    WindowInfo, child_windows, describe_window, list_top_level_windows, snapshot_handles, windows_of_executable,
+    WindowInfo, child_windows, describe_window, is_main_window_candidate, list_top_level_windows, snapshot_handles,
+    windows_of_executable,
 )
 from cirana.storage.settings_manager import SettingsManager
 
@@ -45,6 +46,11 @@ EXISTING_WINDOW_AFTER = 4.0  # single-instance packaged apps (Settings...) show 
 MAX_WINDOW_TIMEOUT = 45.0  # a slow application keeps getting time while the process CIRANA started is still running
 EXITED_GRACE = 5.0  # after the started process exited, a window may still come from a process it handed over to
 TREE_REFRESH = 0.5  # seconds between process-tree / window-owner scans
+RECONNECT_WAIT = 3.0  # how long a window that moved itself out of the host is waited for (to become top-level)
+# A re-created window appears at once (often before the old one is destroyed). Looking only briefly keeps a window
+# the user opens a little later (e.g. a new Explorer window) from being taken for it.
+REPLACE_WAIT = 1.0
+MAX_RECONNECTS = 2  # reconnections in a row that are lost again right away; then CIRANA stops (no endless loop)
 UNKNOWN_WINDOW_REASON = "CIRANA cannot tell which window belongs to this application (its executable is unknown)."
 # Start-menu entries whose AppUserModelID names a classic program that CIRANA can host.
 _AUMID_PROGRAMS = {"microsoft.windows.remotedesktop": "mstsc.exe"}
@@ -79,6 +85,12 @@ class PlaygroundSession:
     warnings: list[str] = field(default_factory=list)
     icon_app: AppEntry | None = None
     docked: bool = False  # kept over the tab as its own window instead of re-parented (see window_embedder)
+    safe_mode: bool = False  # child mode proved unstable for this window: it is only docked from now on
+    reconnects: int = 0  # reconnections in a row after window losses (see PlaygroundManager.window_lost)
+    # Who the hosted window belongs to, recorded when it was hosted: a replacement window must match all of it.
+    process_created: float = 0.0  # creation time of process ``pid`` (0: unknown; a reused pid differs)
+    window_class: str = ""
+    known_windows: set[int] = field(default_factory=set)  # top-level windows that already existed then
 
     @property
     def live(self) -> bool:
@@ -212,6 +224,7 @@ class NoWindow:
     """Why no window was picked. Falsy, so code that expects ``WindowInfo | None`` keeps working."""
 
     reason: str
+    exited: bool = False  # the application's process is gone
 
     def __bool__(self) -> bool:
         return False
@@ -323,6 +336,50 @@ def wait_for_app_window(
     return None
 
 
+def process_started(pid: int) -> float:
+    """Creation time of process ``pid`` (0.0 when it is gone or cannot be inspected). With the pid it identifies one
+    process: a pid that Windows hands out again belongs to a process with another creation time."""
+    try:
+        return psutil.Process(pid).create_time() if pid else 0.0
+    except psutil.Error:
+        return 0.0
+
+
+def find_replacement_window(
+    session: PlaygroundSession, old_hwnd: int, escaped: bool, exclude: set[int], cancel: threading.Event,
+    timeout: float = RECONNECT_WAIT, poll: float = 0.2,
+) -> WindowInfo | NoWindow | None:
+    """Worker-thread: the window that took the place of a lost hosted window, or why there is none.
+
+    There is no creation time for a window in Win32, so a replacement must match everything else that is known: the
+    same process (pid *and* process creation time), the same window class, a real main window, not hosted already,
+    and new (absent from the top-level windows that existed when the lost one was hosted, which rules out the
+    application's other windows). Exactly one such window must be there on two polls in a row; with more than one,
+    none is taken. ``escaped``: the lost window itself left the host and is the candidate, once it is top-level."""
+    deadline = time.monotonic() + timeout
+    pid, seen = session.pid, 0
+    while not cancel.is_set():
+        if not session.process_created or process_started(pid) != session.process_created:
+            return NoWindow("Its process has ended.", exited=True)
+        if escaped:
+            if w.IsWindow(old_hwnd) and w.window_pid(old_hwnd)[0] == pid and embedder.is_top_level(old_hwnd) \
+                    and is_main_window_candidate(old_hwnd) and old_hwnd not in exclude:
+                return describe_window(old_hwnd)
+        else:
+            found = [i for i in list_top_level_windows() if i.pid == pid and i.class_name == session.window_class
+                     and i.hwnd != old_hwnd and i.hwnd not in session.known_windows and i.hwnd not in exclude]
+            if len(found) > 1:
+                return NoWindow(f"It opened {len(found)} new windows of the same kind; CIRANA cannot tell which one "
+                                "replaces the hosted one, so it took none.")
+            if found and found[0].hwnd == seen:
+                return found[0]
+            seen = found[0].hwnd if found else 0
+        if time.monotonic() >= deadline:
+            return NoWindow("")
+        cancel.wait(poll)
+    return None
+
+
 class PlaygroundManager(QObject):
     session_added = Signal(str)
     session_updated = Signal(str)
@@ -351,6 +408,8 @@ class PlaygroundManager(QObject):
         # closed. Their recovery record stays until the view has verified that the window left the host.
         self._unreleased: dict[str, PlaygroundSession] = {}
         self.current_id = ""  # session whose tab is selected (kept up to date by the view)
+        # Programs whose window did not stay put in child mode during this run: their next windows are docked.
+        self._unstable_child: set[str] = set()
 
     # -- registration / queries -----------------------------------------------------
     def set_attacher(self, attacher: Attacher) -> None:
@@ -449,6 +508,85 @@ class PlaygroundManager(QObject):
         QTimer.singleShot(0, lambda: self._on_window_found(session.id, info))
         return OpenOutcome("started", f"Hosting {info.title or info.exe_name}…", session.id)
 
+    def dock_only(self, session: PlaygroundSession) -> bool:
+        """Safe mode: child mode already failed for this window, or for this program earlier in this run."""
+        return session.safe_mode or bool(session.exe and session.exe in self._unstable_child)
+
+    def window_lost(self, session_id: str, reason: str, unstable: bool) -> None:
+        """The hosted window closed ("closed") or left its host on its own ("escaped"); ``unstable``: within the
+        observation time right after it was hosted, which counts as a failure of the hosting mode.
+
+        While the same process still runs, its replacement is looked for briefly and reconnected automatically: the
+        window itself when it escaped, a re-created one otherwise (see find_replacement_window for what must match).
+        After an unstable loss the window is only docked from then on (safe mode). Losses in a row are capped by
+        MAX_RECONNECTS; then, and whenever no replacement is certain, the session ends as a normal window."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        escaped = reason == "escaped" and not session.docked  # a docked handle naming another window: it is gone
+        if unstable and not session.docked:  # child mode did not hold for this window: never try it on it again
+            session.safe_mode = True
+            if session.exe:
+                self._unstable_child.add(session.exe)
+        session.reconnects = session.reconnects + 1 if unstable else 1
+        if not session.process_created:  # who the window belonged to is unknown: nothing can be verified
+            self._end_lost(session, escaped, exited=False)
+            return
+        if process_started(session.pid) != session.process_created:
+            self._end_lost(session, escaped, exited=True)
+            return
+        if session.reconnects > MAX_RECONNECTS:
+            self._end_lost(session, escaped, exited=False, detail=(
+                f"It lost its window again right after being hosted, so CIRANA stopped reconnecting it after "
+                f"{MAX_RECONNECTS} attempts; it keeps running as a normal window."))
+            return
+        if not escaped and any(s.state is SessionState.LAUNCHING for s in self._sessions.values()):
+            # Another application is being opened right now: its new window could be taken for a replacement.
+            self.update_state(session_id, SessionState.CLOSED, f"{session.title} closed its window. CIRANA did not "
+                                                               "look for a replacement while another application was "
+                                                               "opening.")
+            return
+        # The lost window itself is no longer hosted (its session is still EMBEDDED until the state below changes).
+        old_hwnd, exclude = session.hwnd, self.hosted_handles() - {session.hwnd}
+        wait = RECONNECT_WAIT if escaped else REPLACE_WAIT
+        self._jobs[session_id] = run_async(
+            lambda cancel: find_replacement_window(session, old_hwnd, escaped, exclude, cancel, timeout=wait),
+            lambda info, sid=session_id: self._on_replacement(sid, info, escaped),
+            lambda err, sid=session_id: self._on_replacement(sid, NoWindow(f"The search failed: {err}"), escaped),
+        )
+        what = "moved its window out of CIRANA" if escaped else "replaced its window"
+        self.update_state(session_id, SessionState.LAUNCHING, f"{session.title} {what}; reconnecting…")
+
+    def _end_lost(self, session: PlaygroundSession, escaped: bool, exited: bool, detail: str = "") -> None:
+        """No reconnection: a closed window (or ended process) is CLOSED, a window that still exists EXTERNAL."""
+        if escaped and not exited:
+            state = SessionState.EXTERNAL
+            message = f"{session.title} moved its window out of CIRANA on its own; it is a normal window now."
+        elif detail and not exited:  # the process still runs and has a window CIRANA did not (or may not) take
+            state, message = SessionState.EXTERNAL, f"{session.title} replaced its window."
+        else:
+            state, message = SessionState.CLOSED, f"{session.title} closed its window."
+            if exited and session.safe_mode and not session.docked and session.reconnects == 1:
+                message += (" It ended right after it was placed in the tab, so CIRANA docks this program instead "
+                            "from now on.")
+        self.update_state(session.id, state, f"{message} {detail}".strip())
+
+    def _on_replacement(self, session_id: str, info: WindowInfo | NoWindow | None, escaped: bool) -> None:
+        session = self._sessions.get(session_id)
+        if session is None or info is None:  # tab closed, or the search was cancelled
+            return
+        if not info:
+            self._jobs.pop(session_id, None)
+            self._end_lost(session, escaped, info.exited, "" if info.exited else info.reason)  # "": none came
+            return
+        self._on_window_found(session_id, info)
+        if session.state is SessionState.EMBEDDED:
+            how = "docked it over the tab (safe mode)" if session.docked and session.safe_mode else "hosted it again"
+            what = "moved its window out of CIRANA" if escaped else "replaced its window"
+            session.warnings.append(f"{session.title} {what}; CIRANA verified that the window belongs to the same "
+                                    f"process and {how}.")
+            self.session_updated.emit(session_id)
+
     def reattach(self, session_id: str) -> embedder.EmbedResult | None:
         """Put a detached window back into its tab."""
         session = self._sessions.get(session_id)
@@ -542,6 +680,10 @@ class PlaygroundManager(QObject):
                 "probably reused an existing window or is still starting; CIRANA did not touch it.",
             )
             return
+        if info.hwnd in self.hosted_handles():  # two searches can find the same window: it is never hosted twice
+            self._settle(session_id, SessionState.EXTERNAL, f"The window CIRANA found for {session.title} is already "
+                                                            "hosted in another tab; it was left there.")
+            return
         session.hwnd, session.pid = info.hwnd, info.pid
         if not session.title or session.title == session.exe:
             session.title = info.title
@@ -559,6 +701,10 @@ class PlaygroundManager(QObject):
     def _apply_embed_result(self, session: PlaygroundSession, result: embedder.EmbedResult) -> None:
         session.warnings = list(result.warnings)
         if result.ok:
+            if session.hwnd:  # who the window belongs to, for recognising a replacement (find_replacement_window)
+                session.process_created = process_started(session.pid)
+                session.window_class = w.class_name(session.hwnd)
+                session.known_windows = snapshot_handles()
             self.update_state(session.id, SessionState.EMBEDDED, "")
             return
         verb = "could not be hosted" if result.status is embedder.EmbedStatus.FAILED else "cannot be hosted"

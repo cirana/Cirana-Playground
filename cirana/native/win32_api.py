@@ -125,6 +125,7 @@ GetClassNameW = _bind(user32, "GetClassNameW", ctypes.c_int, HWND, wintypes.LPWS
 GetParent = _bind(user32, "GetParent", HWND, HWND)
 GetAncestor = _bind(user32, "GetAncestor", HWND, HWND, wintypes.UINT)
 GetWindow = _bind(user32, "GetWindow", HWND, HWND, wintypes.UINT)
+GetDesktopWindow = _bind(user32, "GetDesktopWindow", HWND)
 SetParent = _bind(user32, "SetParent", HWND, HWND, HWND)
 GetWindowRect = _bind(user32, "GetWindowRect", wintypes.BOOL, HWND, ctypes.POINTER(wintypes.RECT))
 GetClientRect = _bind(user32, "GetClientRect", wintypes.BOOL, HWND, ctypes.POINTER(wintypes.RECT))
@@ -238,6 +239,62 @@ def process_is_elevated(pid: int) -> bool | None:
             CloseHandle(token)
     finally:
         CloseHandle(handle)
+
+
+TokenIntegrityLevel = 25
+GetSidSubAuthorityCount = _bind(advapi32, "GetSidSubAuthorityCount", ctypes.POINTER(ctypes.c_ubyte), ctypes.c_void_p)
+GetSidSubAuthority = _bind(advapi32, "GetSidSubAuthority", ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+                           wintypes.DWORD)
+
+
+def process_integrity(pid: int) -> int | None:
+    """The process's mandatory integrity level (0x2000 medium, 0x3000 high, 0x4000 system; uiAccess adds 0x10), or
+    None when its token cannot be inspected. User Interface Privilege Isolation (UIPI) refuses every window change
+    (styles, parent, position, show state) from a process with a *lower* level: measured as Win32 error 5."""
+    handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    token = wintypes.HANDLE()
+    try:
+        if not OpenProcessToken(handle, TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        try:
+            buffer = ctypes.create_string_buffer(64)  # TOKEN_MANDATORY_LABEL: a SID pointer followed by the SID
+            returned = wintypes.DWORD(0)
+            if not GetTokenInformation(token, TokenIntegrityLevel, buffer, len(buffer), ctypes.byref(returned)):
+                return None
+            sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+            count = GetSidSubAuthorityCount(sid)[0]
+            return int(GetSidSubAuthority(sid, count - 1)[0]) if count else None
+        finally:
+            CloseHandle(token)
+    finally:
+        CloseHandle(handle)
+
+
+ERROR_ACCESS_DENIED = 5
+ERROR_INVALID_WINDOW_HANDLE = 1400
+
+
+def explain_error(code: int, higher_rights: bool | None = None) -> str:
+    """A readable cause for the Win32 errors window hosting runs into. ``higher_rights``: whether the application's
+    integrity level is above CIRANA's (None: its token could not be inspected)."""
+    if code == ERROR_ACCESS_DENIED:
+        if higher_rights:
+            return ("Windows denied access (Win32 error 5): the application runs with higher rights than CIRANA (for "
+                    "example as administrator), and Windows (UIPI) does not let a lower-rights program change its "
+                    "window.")
+        if higher_rights is None:
+            return ("Windows denied access (Win32 error 5). CIRANA cannot inspect the application's rights: it most "
+                    "likely runs with higher rights or under another user account, and Windows (UIPI) does not let "
+                    "CIRANA change its window.")
+        return ("Windows denied access (Win32 error 5) although the application runs with the same rights as CIRANA; "
+                "its window refuses to be changed by other programs.")
+    if code == ERROR_INVALID_WINDOW_HANDLE:
+        return "The window was closed while CIRANA was setting it up (Win32 error 1400)."
+    if code:
+        return f"Windows refused the change ({ctypes.FormatError(code).strip().rstrip('.')}; Win32 error {code})."
+    return "Windows did not apply the change and reported no error code."
 
 
 IO_REPARSE_TAG_APPEXECLINK = 0x8000001B

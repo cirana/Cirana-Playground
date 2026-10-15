@@ -95,9 +95,9 @@ class SessionPage(QWidget):
         root.addLayout(self.body, 1)
 
     # -- hosting ---------------------------------------------------------------------------
-    def attach(self, info: WindowInfo, launched_by_cirana: bool) -> EmbedResult:
+    def attach(self, info: WindowInfo, launched_by_cirana: bool, force_dock: bool = False) -> EmbedResult:
         self.body.setCurrentWidget(self.host)  # visible (and sized) before the window moves in
-        result = self.host.attach(info, launched_by_cirana)
+        result = self.host.attach(info, launched_by_cirana, force_dock=force_dock)
         if not result.ok:
             self.body.setCurrentWidget(self.panel)
         return result
@@ -129,7 +129,10 @@ class SessionPage(QWidget):
         self.tertiary.show()
         self.tertiary.setText(" Cancel" if state is SessionState.LAUNCHING else " Close tab")
         window_alive = bool(session.hwnd) and bool(w.IsWindow(session.hwnd))
-        if state is SessionState.LAUNCHING:
+        if state is SessionState.LAUNCHING and session.message:  # reconnecting a replaced or moved window
+            self.panel_title.setText(f"Reconnecting {session.title}…")
+            self.panel_text.setText(session.message)
+        elif state is SessionState.LAUNCHING:
             self.panel_title.setText(f"Starting {session.title}…")
             self.panel_text.setText("Waiting for the application window. The tab fills in as soon as it appears.")
         elif state is SessionState.DETACHED:

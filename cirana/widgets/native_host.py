@@ -1,12 +1,18 @@
 """A native Qt widget whose HWND hosts one foreign window."""
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
 from cirana.native import win32_api as w
 from cirana.native import window_embedder as embedder
 from cirana.native.window_discovery import WindowInfo
+
+# After a window is hosted, losing it within this many seconds (it re-created its window, moved itself out of the
+# host, or its process ended) counts as a compatibility failure of the hosting mode, not as a normal close.
+OBSERVE_SECONDS = 5.0
 
 
 class NativeHost(QWidget):
@@ -51,6 +57,8 @@ class NativeHost(QWidget):
         self._docked_minimized = False  # a docked window was minimized together with CIRANA
         self._misplaced_streak = 0  # corrections of the same rectangle that did not take (see _keep_in_place)
         self._misplaced_rect: tuple[int, int, int, int] | None = None
+        self._attached_at = 0.0
+        self.lost_while_observing = False  # the last loss happened within OBSERVE_SECONDS of attaching
 
     @property
     def embedded(self) -> embedder.EmbeddedWindow | None:
@@ -64,16 +72,22 @@ class NativeHost(QWidget):
         ratio = self.devicePixelRatioF()
         return max(1, round(self.width() * ratio)), max(1, round(self.height() * ratio))
 
-    def attach(self, info: WindowInfo, launched_by_cirana: bool, allow_dock: bool = True) -> embedder.EmbedResult:
+    def attach(self, info: WindowInfo, launched_by_cirana: bool, allow_dock: bool = True,
+               force_dock: bool = False) -> embedder.EmbedResult:
         """``allow_dock=False`` (the re-parenting proof of concept): windows that cannot be re-parented are refused
-        by ``check_compatibility`` instead of being docked."""
+        by ``check_compatibility`` instead of being docked. ``force_dock``: child mode already proved unstable for
+        this window (safe mode). Otherwise a window that Windows refuses to re-parent is docked as a fallback."""
         if self._embedded is not None:
             return embedder.EmbedResult(embedder.EmbedStatus.BLOCKED, "This host already contains a window.")
-        if allow_dock and embedder.hosting_mode(info) == embedder.DOCKED:  # never re-parent these: dock instead
+        width, height = self._device_size()
+        if allow_dock and (force_dock or embedder.hosting_mode(info) == embedder.DOCKED):  # never re-parent these
             result, embedded = embedder.dock(info, int(self.winId()), launched_by_cirana)
+        elif allow_dock:
+            result, embedded = embedder.embed_or_dock(info, int(self.winId()), width, height, launched_by_cirana)
         else:
-            width, height = self._device_size()
             result, embedded = embedder.embed(info, int(self.winId()), width, height, launched_by_cirana)
+        if result.stranded is not None:  # its restore is not verified: it may still be parented to this host
+            self._released = result.stranded
         if embedded is not None:
             self._embedded = embedded
             self._released = None
@@ -82,6 +96,7 @@ class NativeHost(QWidget):
             self._app_active = True  # it was the foreground window a moment ago
             self._docked_minimized = False
             self._misplaced_streak, self._misplaced_rect = 0, None
+            self._attached_at, self.lost_while_observing = time.monotonic(), False
             self._focus_watch.start()
             if embedded.docked:
                 self.window().installEventFilter(self)  # follow the main window while it is dragged
@@ -287,13 +302,20 @@ class NativeHost(QWidget):
         if embedded is None:
             return
         if not embedder.is_alive(embedded):
+            if embedded.docked:
+                embedder.detach(embedded)  # nothing left to move: only its taskbar record is dropped
             self._lose("closed")
         elif not embedder.is_still_embedded(embedded):
+            if embedded.docked:  # the handle names another window now: it is never touched, the record is dropped
+                embedder.detach(embedded)
+            else:  # it moved itself out but still carries CIRANA's changes: give them back if it is top-level now
+                embedder.give_back_escaped(embedded)
             self._lose("escaped")
         else:
             self._set_hung(embedder.is_hung(embedded))
 
     def _lose(self, reason: str) -> None:
+        self.lost_while_observing = time.monotonic() - self._attached_at < OBSERVE_SECONDS
         self._embedded = None
         self._stop_watching()
         self.window_lost.emit(reason)

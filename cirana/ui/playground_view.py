@@ -313,9 +313,11 @@ class PlaygroundView(QWidget):
         page = self._pages.get(session.id)
         if page is None:
             return embedder.EmbedResult(embedder.EmbedStatus.BLOCKED, "The tab was closed.")
-        result = page.attach(info, session.launched_by_cirana)
+        result = page.attach(info, session.launched_by_cirana, force_dock=self.manager.dock_only(session))
         embedded = page.host.embedded
         session.docked = bool(embedded and embedded.docked)
+        if page.host.restore_pending():  # a failed attempt could not be undone yet: keep its recovery record
+            self._sync_record(session.id, page)
         if result.ok and session.id == self.current_session_id():
             host = page.host
             QTimer.singleShot(80, host, lambda: host.focus_embedded(explicit=True))
@@ -469,16 +471,9 @@ class PlaygroundView(QWidget):
         self.ctx.actions.launch(app_id, "embedded")
 
     def _on_lost(self, sid: str, reason: str) -> None:
-        session = self.manager.get(sid)
-        if session is None:
-            return
-        if reason == "closed":
-            self.manager.update_state(sid, SessionState.CLOSED, f"{session.title} closed its window.")
-        else:
-            self.manager.update_state(
-                sid, SessionState.EXTERNAL,
-                f"{session.title} moved its window out of CIRANA on its own; it is a normal window now.",
-            )
+        page = self._pages.get(sid)
+        if page is not None:  # reconnects a replacement window when it can be verified, else ends the session
+            self.manager.window_lost(sid, reason, unstable=page.host.lost_while_observing)
 
     # -- selection / focus -------------------------------------------------------------------------
     def apply_tab_order(self, session_ids: list[str]) -> None:
