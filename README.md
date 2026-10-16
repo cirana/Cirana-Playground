@@ -180,6 +180,24 @@ when it is larger than the monitor, and the reason ("does not fit beside the oth
 is shown on its row and reported once. The drop preview uses the same planning. What an
 application draws inside a window of the size it accepted is up to the application.
 
+**Adaptive layout engine (the default).** With nothing stored, all-window tiling uses *Automatic (adaptive)*
+(`wm/adaptive.py`); a layout you chose before is kept as it is (records are never rewritten, "By window count" stays
+what it was). Per monitor (or workspace) it lays out BSP, main + side panel, grid, a single column and side by side
+for real, and scores them: a window that cannot get its learned minimum size costs 100 (so a layout that holds
+everybody always wins), then awkward tile proportions (which includes the monitor's shape and orientation: three
+windows get side by side on an ultrawide and a column on a portrait monitor), slivers, tiny tiles, unbalanced areas
+and how far the windows already tiled would have to move. The layout in use is kept unless another one is better by
+more than a threshold (hysteresis) and holds as many windows, and it is held outright while the same windows are
+there after you resized, swapped or stacked (the proportions you set live in the layout's own fields and in the
+tree, so they come back whenever the engine returns to that layout). Choosing any layout by hand stops the engine
+for that scope - dynamic tiling goes on inside your layout - and choosing *Automatic (adaptive)* again starts it.
+The Windows page shows what it uses. Windows that fit no layout float, with the reason, as before.
+
+**Smart BSP.** A new window still splits the focused tile along its longer side when that is a good tiling. When it
+would break a minimum size, make a sliver or an awkward tile, every tile and both directions (and a ratio from the
+two minimums) are compared (`bsp.insert`) and the cheapest wins; nothing else in the tree changes, so ratios you set
+survive and a closing window only gives its space to its sibling.
+
 **One workspace.** A per-workspace switch (*Dynamic tiling* in the layout panel, stored with the layout as `"dynamic"`; records written
 before it existed read as off). While it is on **and** the workspace is the active one, its tiled layout (side by
 side, main + side panel, grids) follows its windows by itself:

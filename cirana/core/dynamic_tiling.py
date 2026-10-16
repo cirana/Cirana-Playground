@@ -70,10 +70,10 @@ from cirana.core.background import Job, run_async
 from cirana.core.workspace_controller import EntryState, WorkspaceController
 from cirana.native import win32_api as w32
 from cirana.storage.json_store import JsonStore
-from cirana.wm import bsp
+from cirana.wm import adaptive, bsp
 from cirana.wm.controller import TOLERANCE, Placement, Result, Status
 from cirana.wm.identity import Rect, TrackedWindow
-from cirana.wm.layout import (BSP, GRID, KIND_NAMES, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, Resize, Size, clamp_into,
+from cirana.wm.layout import (ADAPTIVE, BSP, GRID, KIND_NAMES, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, Resize, Size, clamp_into,
                               fit_layout, fixed_kind, from_fraction, grow, keep_visible, moved_edges, resize_tile,
                               tile, to_fraction)
 from cirana.wm.monitors import Monitor, MonitorRef, monitor_for_rect, resolve
@@ -141,6 +141,7 @@ class Group:
     # Set when the layout the user chose cannot give every window its minimum size and another one is used instead
     # (``spec`` is that other layout; what is stored for the chosen one is never touched): why, for the user.
     fallback: str = ""
+    adaptive_key: str = ""  # the adaptive engine chose this layout (adaptive.key_of); "" = the user's own choice
 
     @property
     def bsp_active(self) -> bool:
@@ -190,6 +191,10 @@ class DynamicTiler(QObject):
         self._global_stacks: list[dict] = []  # all-window tiling: stacks of window keys
         self._monocle: dict[str, tuple[str, frozenset]] = {}  # group id -> (unit id, the units when it started)
         self._focus_hint: dict[str, str] = {}  # group id -> unit that had the focus last (BSP: new windows split it)
+        self._adaptive: dict[str, str] = {}  # group id -> layout the adaptive engine uses now (hysteresis)
+        # group id -> windows the user shaped the layout for (resize, swap, stack): the engine keeps its choice while
+        # they are the same ones; None = for the set that is laid out next
+        self._lock: dict[str, frozenset | None] = {}
         self._user_float: set[str] = set()  # windows the user took out of tiling with the keyboard
         self._stack_hidden: set[str] = set()  # keys of windows CIRANA minimized for a stack (``stack_hide``)
         self._scope_seen = ""  # the scope of the last re-tile (stack windows are shown again when it changes)
@@ -237,7 +242,8 @@ class DynamicTiler(QObject):
 
     def global_layout(self) -> LayoutSpec:
         raw = self.settings.get("global_layout") if self.settings is not None else None
-        spec = LayoutSpec.from_dict(raw) if isinstance(raw, dict) and raw else LayoutSpec(MAIN_SIDE, gap=8)
+        # (nothing stored = the user never chose: the adaptive engine; a stored choice is never replaced)
+        spec = LayoutSpec.from_dict(raw) if isinstance(raw, dict) and raw else LayoutSpec(ADAPTIVE, gap=8)
         if not spec.tiled:
             spec.kind = MAIN_SIDE
         return spec
@@ -528,23 +534,32 @@ class DynamicTiler(QObject):
                monitors: list[Monitor], scope: str, swap: tuple[str, str] | None = None) -> Group:
         """A group of windows laid out together; units whose minimum sizes do not fit beside the others float."""
         units = self._units(scope, candidates)
-        spec = fixed_kind(spec, len(units))  # automatic: resolved once, before minimum sizes are considered
+        smart = spec.kind == ADAPTIVE  # the engine picks the layout below, once the minimum sizes are known
+        if not smart:
+            spec = fixed_kind(spec, len(units))  # automatic: resolved once, before minimum sizes are considered
         if scope == GLOBAL:
             for key, value in self._adjust.get(group_id, {}).items():
                 setattr(spec, key, value)
         monitor = resolve(spec.monitor, monitors)
         if monitor is None:
-            return Group(group_id, spec, units, scope=scope)
+            return Group(group_id, fixed_kind(spec, len(units)), units, scope=scope)
         ids = [unit.id for unit in units]
-        if spec.kind_for(len(units)) == BSP:
+        sizes = [self._unit_minimum(unit, monitor) for unit in units]
+        wanted = {unit_id: size for unit_id, size in zip(ids, sizes) if any(size)}
+        out, fallback, key = set(), "", ""
+        if smart or spec.kind_for(len(units)) == BSP:
             tree = self._tree_of(group_id, spec, scope)
             if swap is not None:
                 tree = self._swap_tree(tree, *swap)
             area, gap = self._inner(spec, monitor)
-            spec.bsp = bsp.to_dict(bsp.sync(tree, ids, area, self._focus_hint.get(group_id), gap))
-        sizes = [self._unit_minimum(unit, monitor) for unit in units]
-        out, fallback = set(), ""
-        if any(any(m) for m in sizes):
+            spec.bsp = bsp.to_dict(bsp.sync(tree, ids, area, self._focus_hint.get(group_id), gap, wanted))
+        if smart:
+            lock = self._lock.get(group_id, False)
+            last = {unit_id: rect for unit_id, (group, rect) in self._targets.items() if group == group_id}
+            choice = adaptive.choose(spec, monitor.work, monitor.scale, sizes, ids, self._adaptive.get(group_id, ""),
+                                     last, hold=lock is None or lock == frozenset(ids))
+            spec, out, key = choice.spec, set(choice.floating), choice.key
+        elif any(any(m) for m in sizes):
             # The chosen layout is kept while every window fits. When it cannot give every window its minimum size,
             # another layout is used (a pure function of the sizes, so it cannot flip back and forth) before any
             # window is left floating.
@@ -560,7 +575,7 @@ class DynamicTiler(QObject):
         minimums = {unit.id: sizes[i] for i, unit in enumerate(units) if i not in out and any(sizes[i])}
         monocle = self._monocle.get(group_id)
         shown = monocle[0] if monocle is not None and any(u.id == monocle[0] for u in tiled) else ""
-        return Group(group_id, spec, tiled, floating, minimums, shown, scope, fallback)
+        return Group(group_id, spec, tiled, floating, minimums, shown, scope, fallback, key)
 
     def _unit_minimum(self, unit: Unit, monitor: Monitor) -> Size:
         sizes = [self.minimum(window.key, monitor) for _s, window in unit.members]
@@ -939,6 +954,7 @@ class DynamicTiler(QObject):
     def _store_proportions(self, group: Group, changes: dict) -> None:
         """Keep the proportions of a resized layout where the keyboard commands keep theirs: the BSP tree through
         ``_set_tree``; ratios and weights per monitor (all-window tiling) or in the workspace."""
+        self._hold(group.id)
         if "bsp" in changes:
             self._set_tree(group, bsp.from_dict(changes["bsp"]))
         rest = {key: value for key, value in changes.items() if key != "bsp"}
@@ -1064,6 +1080,8 @@ class DynamicTiler(QObject):
                 if bsp.to_dict(swapped) != bsp.to_dict(tree):
                     self._set_tree(group, swapped)
         first_members, second_members = self._members(first), self._members(second)
+        for group in self._last_groups:
+            self._hold(group.id)
         if not self.global_on:
             entries = {entry.id for entry in self.wm.workspaces.active().apps} if self.wm.workspaces.active() else set()
             order = [s.entry.id for s in self.wm.statuses(self.wm.workspaces.active_id)]
@@ -1262,6 +1280,7 @@ class DynamicTiler(QObject):
             self._say(f"The layout is adjusted to the minimum sizes of the windows ({group.fallback}); "
                       "it cannot be resized until they fit again.")
             return False
+        self._hold(group.id)
         if kind == BSP:
             tree = bsp.resize(bsp.from_dict(group.spec.bsp), unit.id, horizontal, delta)
             if tree is None:
@@ -1318,6 +1337,7 @@ class DynamicTiler(QObject):
         group, unit, other = mine[0], mine[1], theirs[1]
         if unit.id == other.id:
             return False
+        self._hold(group.id)
         scope = group.scope
         slot = next(s for s, w in unit.members if w.key == window.key)
         stacks = [dict(s, members=list(s["members"])) for s in self._stack_list(scope)]
@@ -1375,6 +1395,8 @@ class DynamicTiler(QObject):
         stack = next((s for s in stacks if slot in s["members"]), None)
         if stack is None:
             return
+        for known in self._last_groups:
+            self._hold(known.id)
         stack["members"].remove(slot)
         if stack["active"] == slot and stack["members"]:
             stack["active"] = stack["members"][0]
@@ -1487,6 +1509,28 @@ class DynamicTiler(QObject):
         self._hidden_store.save({"windows": []})
 
     # -- re-tiling -----------------------------------------------------------------------------------------------
+    def _remember_choices(self, groups: list[Group]) -> None:
+        """What the adaptive engine decided is what it keeps (hysteresis); a hold the user asked for is tied to the
+        windows laid out now."""
+        for group in groups:
+            if not group.adaptive_key:
+                continue
+            self._adaptive[group.id] = group.adaptive_key
+            ids = frozenset(unit.id for unit in group.units)
+            if group.id in self._lock:
+                if self._lock[group.id] is None:
+                    self._lock[group.id] = ids
+                elif self._lock[group.id] != ids:
+                    del self._lock[group.id]  # other windows: the engine decides again
+
+    def _hold(self, group_id: str) -> None:
+        """The user shaped this layout (resize, swap, stack): the adaptive engine leaves it alone for these windows."""
+        self._lock[group_id] = None
+
+    def adaptive_layouts(self) -> list[str]:
+        """Names of the layouts the adaptive engine uses right now (one per monitor / workspace)."""
+        return [adaptive.name_of(g.adaptive_key) for g in self._last_groups if g.adaptive_key]
+
     def _cancel(self) -> None:
         self._generation += 1
         if self._job is not None:
@@ -1533,6 +1577,7 @@ class DynamicTiler(QObject):
                     else self.wm.workspaces.get(group.scope).layout.bsp):
                 self._set_tree(group, bsp.from_dict(group.spec.bsp))
         self._signature = signature
+        self._remember_choices(groups)
         self._last_groups = groups
         self._scope_seen = signature[0]
         wanted = self._wanted_hidden(groups)

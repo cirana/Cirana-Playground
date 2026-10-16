@@ -11,12 +11,18 @@ On disk (workspaces) the tree is a small dict: ``{"leaf": id}`` or ``{"split": "
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Union
 
 from cirana.wm.identity import Rect
 
 MIN_RATIO, MAX_RATIO = 0.1, 0.9
+ASPECT_LOW, ASPECT_HIGH = 0.4, 2.8  # tiles outside this width / height range are awkward
+SLIVER = 0.15  # a tile narrower or lower than this share of the area is a sliver
+MOVE_WEIGHT = 0.5
+FOCUS_BONUS = 0.35  # the focused tile is split unless another choice is clearly better
+ACCEPT = 0.05  # the focused tile's usual split is taken as it is when it is this good
 FLOOR = 0.05  # a resized tile leaves each window at least this share of the area (when it has no minimum)
 MAX_DEPTH = 32  # a damaged file can never make the recursion run away
 
@@ -100,24 +106,75 @@ def rects(node: Node | None, area: Rect, gap: int = 0, minimums: dict[str, Size]
 
 
 # -- changes (each returns the new tree; the input is never modified) ---------------------------------------------
-def insert(node: Node | None, new_id: str, area: Rect, target: str | None = None, gap: int = 0) -> Node:
-    """Add ``new_id`` by splitting ``target`` (default: the last leaf) along its longer side; the new window takes
-    the right / lower half."""
+def _split_leaf(node: Node, target: str, new_id: str, vertical: bool, ratio: float) -> Node:
+    """A copy of the tree in which ``target`` is split in two: itself and the new window (right / lower)."""
+    def walk(item: Node) -> Node:
+        if isinstance(item, Leaf):
+            return Split(vertical, ratio, Leaf(item.id), Leaf(new_id)) if item.id == target else Leaf(item.id)
+        return Split(item.vertical, item.ratio, walk(item.a), walk(item.b))
+
+    return walk(node)
+
+
+def _quality(boxes: dict[str, Rect], before: dict[str, Rect], area: Rect, minimums: dict[str, Size],
+             moves: bool = True) -> float:
+    """How good a tiling is (lower is better): windows below their minimum size, awkward proportions, slivers and
+    how far the existing windows have to move. Cheap and deterministic."""
+    width, height = max(1, area[2] - area[0]), max(1, area[3] - area[1])
+    cost = 0.0
+    for leaf, box in boxes.items():
+        w, h = max(1, box[2] - box[0]), max(1, box[3] - box[1])
+        need = minimums.get(leaf, (0, 0))
+        if need[0] > w:
+            cost += 50.0 * (need[0] - w) / need[0]
+        if need[1] > h:
+            cost += 50.0 * (need[1] - h) / need[1]
+        aspect = w / h
+        cost += (max(0.0, math.log(ASPECT_LOW / aspect), math.log(aspect / ASPECT_HIGH))) / max(1, len(boxes))
+        cost += max(0.0, SLIVER - min(w / width, h / height)) * 8.0
+        old = before.get(leaf)
+        if moves and old is not None:
+            cost += MOVE_WEIGHT * (abs(box[0] - old[0]) + abs(box[1] - old[1]) + abs(box[2] - old[2])
+                                   + abs(box[3] - old[3])) / (width + height) / max(1, len(before))
+    return cost
+
+
+def insert(node: Node | None, new_id: str, area: Rect, target: str | None = None, gap: int = 0,
+           minimums: dict[str, Size] | None = None) -> Node:
+    """Add ``new_id`` by splitting a tile; the new window takes the right / lower half. The focused tile (``target``,
+    default: the last leaf) along its longer side is the normal answer; every other tile and the other direction
+    are compared with it (minimum sizes, proportions, slivers, how much the existing windows move) and win only
+    when they are clearly better. Nothing else in the tree changes: the user's ratios stay."""
     if node is None:
         return Leaf(new_id)
     ids = leaves(node)
     if new_id in ids:
         return copy(node)
     target = target if target in ids else ids[-1]
-    box = rects(node, area, gap)[target]
-    vertical = box[2] - box[0] >= box[3] - box[1]
-
-    def walk(item: Node) -> Node:
-        if isinstance(item, Leaf):
-            return Split(vertical, 0.5, Leaf(item.id), Leaf(new_id)) if item.id == target else Leaf(item.id)
-        return Split(item.vertical, item.ratio, walk(item.a), walk(item.b))
-
-    return walk(node)
+    minimums = minimums or {}
+    before = rects(node, area, gap, minimums)
+    box = before[target]
+    usual = _split_leaf(node, target, new_id, box[2] - box[0] >= box[3] - box[1], 0.5)
+    if _quality(rects(usual, area, gap, minimums), before, area, minimums, moves=False) <= ACCEPT:
+        return usual  # the normal answer is good: no search, nothing surprising
+    best, best_cost = None, 0.0
+    for rank, leaf in enumerate([target] + [i for i in ids if i != target]):
+        box = before[leaf]
+        longer = box[2] - box[0] >= box[3] - box[1]
+        for vertical in (longer, not longer):
+            need_a, need_b = minimums.get(leaf, (0, 0)), minimums.get(new_id, (0, 0))
+            axis = 0 if vertical else 1
+            ratios = [0.5]
+            if need_a[axis] and need_b[axis]:
+                ratios.append(min(MAX_RATIO, max(MIN_RATIO, need_a[axis] / (need_a[axis] + need_b[axis]))))
+            for ratio in ratios:
+                tree = _split_leaf(node, leaf, new_id, vertical, ratio)
+                cost = _quality(rects(tree, area, gap, minimums), before, area, minimums)
+                if leaf == target:
+                    cost -= FOCUS_BONUS
+                if best is None or cost < best_cost - 1e-9:
+                    best, best_cost = tree, cost
+    return best
 
 
 def remove(node: Node | None, old_id: str) -> Node | None:
@@ -132,7 +189,8 @@ def remove(node: Node | None, old_id: str) -> Node | None:
     return Split(node.vertical, node.ratio, a, b)
 
 
-def sync(node: Node | None, ids: list[str], area: Rect, focus: str | None = None, gap: int = 0) -> Node | None:
+def sync(node: Node | None, ids: list[str], area: Rect, focus: str | None = None, gap: int = 0,
+         minimums: dict[str, Size] | None = None) -> Node | None:
     """The tree for exactly ``ids``: leaves that left are removed, new ids are inserted in order (each next to the
     focused tile when it is in the tree). Deterministic, and applying it twice changes nothing."""
     wanted = set(ids)
@@ -141,7 +199,7 @@ def sync(node: Node | None, ids: list[str], area: Rect, focus: str | None = None
     seen = set(leaves(node))
     for new in ids:
         if new not in seen:
-            node = insert(node, new, area, focus if focus in seen else None, gap)
+            node = insert(node, new, area, focus if focus in seen else None, gap, minimums)
             seen.add(new)
     return node
 

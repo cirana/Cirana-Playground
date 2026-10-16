@@ -321,11 +321,12 @@ class MinimumFallbackTests(unittest.TestCase):
             self.assertEqual(again[1], first[1])
         self.assertEqual(len(first[1]), 2)
 
-    def test_a_bsp_choice_is_never_replaced_by_a_tree_of_its_own(self):
+    def test_a_bsp_choice_holds_the_windows_with_its_own_smart_tree(self):
         spec = LayoutSpec(BSP, gap=0)
         fitted, out = fit_layout(spec, WORK, [(800, 300)] * 3, 1.0, list("abc"))
-        self.assertEqual(out, [])
-        self.assertNotEqual(fitted.kind, BSP)
+        self.assertEqual(out, [])  # (BSP places new windows where their minimums fit, so it holds them itself)
+        rects = tile(fitted, WORK, 3, 1.0, [(800, 300)] * 3, list("abc"))
+        clean(self, rects)
 
     def test_automatic_is_resolved_for_all_the_windows_first(self):
         spec = LayoutSpec(AUTO, gap=0)

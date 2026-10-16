@@ -20,7 +20,7 @@ from cirana.widgets.dnd import app_id_from, entry_from, entry_mime
 from cirana.widgets.layout_preview import LayoutPreview
 from cirana.widgets.workspace_card import STATE_TEXT, WorkspaceCard, entry_icon_app, repolish
 from cirana.ui.wm_dialogs import AutoLayoutPicker
-from cirana.wm.layout import AUTO, BSP, FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
+from cirana.wm.layout import ADAPTIVE, AUTO, BSP, FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
 from cirana.wm.monitors import resolve
 
 # (label, kind, grid columns): "Grid 2×2" and "Dynamic grid" are the same layout with fixed / automatic columns.
@@ -31,7 +31,8 @@ LAYOUT_CHOICES = [
     ("Dynamic grid", GRID, 0),
     ("Saved positions", FREE, 0),
     ("BSP (split per window)", BSP, 0),
-    ("Automatic (by window count)", AUTO, 0),
+    ("By window count (fixed steps)", AUTO, 0),
+    ("Automatic (adaptive)", ADAPTIVE, 0),
 ]
 STATE_KIND = {EntryState.RUNNING: "good", EntryState.LAUNCHING: "busy", EntryState.AMBIGUOUS: "warn",
               EntryState.UNAVAILABLE: "bad"}
@@ -413,7 +414,7 @@ class WorkspaceView(QWidget):
         finally:
             self._syncing = False
         free = spec.kind == FREE
-        self.ratio_spin.setVisible(spec.kind in (MAIN_SIDE, AUTO))
+        self.ratio_spin.setVisible(spec.kind in (MAIN_SIDE, AUTO, ADAPTIVE))
         self.auto_picker.setVisible(spec.kind == AUTO)
         self.monitor_combo.setEnabled(not free)
         self.gap_spin.setEnabled(not free)

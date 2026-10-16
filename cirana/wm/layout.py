@@ -28,9 +28,10 @@ GRID = "grid"
 FREE = "free"
 BSP = "bsp"
 AUTO = "auto"
-KINDS = (SIDE_BY_SIDE, MAIN_SIDE, GRID, FREE, BSP, AUTO)
+ADAPTIVE = "adaptive"  # the engine picks the best layout itself (cirana.wm.adaptive)
+KINDS = (SIDE_BY_SIDE, MAIN_SIDE, GRID, FREE, BSP, AUTO, ADAPTIVE)
 KIND_NAMES = {SIDE_BY_SIDE: "Side by side", MAIN_SIDE: "Main + side panel", GRID: "Grid", FREE: "Saved positions",
-              BSP: "BSP (split per window)", AUTO: "Automatic (by window count)"}
+              BSP: "BSP (split per window)", AUTO: "By window count (fixed steps)", ADAPTIVE: "Automatic (adaptive)"}
 AUTO_KINDS = (SIDE_BY_SIDE, MAIN_SIDE, GRID, BSP)  # what automatic may pick
 AUTO_STEPS = ("2", "3", "4")  # automatic: the layout for 2, 3, and 4 or more windows (1 window fills the area)
 DEFAULT_AUTO = {"2": SIDE_BY_SIDE, "3": MAIN_SIDE, "4": GRID}
@@ -90,7 +91,7 @@ class LayoutSpec:
     def kind_for(self, count: int) -> str:
         """The concrete layout used for ``count`` tiles (automatic resolves by count; saved positions tile as a
         grid where a tiled layout is needed)."""
-        if self.kind == AUTO:
+        if self.kind in (AUTO, ADAPTIVE):  # (adaptive: the static answer for code that has no engine context)
             if count <= 1:
                 return SIDE_BY_SIDE
             step = str(min(count, 4))
@@ -232,8 +233,9 @@ def tile(spec: LayoutSpec, work: Rect, count: int, scale: float = 1.0,
     if kind == BSP:
         names = list(ids[:count]) if ids and len(ids) >= count else [str(i) for i in range(count)]
         area = (left, top, right, bottom)
-        tree = bsp.sync(bsp.from_dict(spec.bsp), names, area, gap=gap)
-        boxes = bsp.rects(tree, area, gap, dict(zip(names, mins)) if mins else None)
+        wanted = dict(zip(names, mins)) if mins else None
+        tree = bsp.sync(bsp.from_dict(spec.bsp), names, area, gap=gap, minimums=wanted)
+        boxes = bsp.rects(tree, area, gap, wanted)
         return [boxes[name] for name in names]
     if kind == SIDE_BY_SIDE:
         return [(a, top, b, bottom) for a, b in _split(left, right, padded(spec.weights, count), gap, widths)]
@@ -286,7 +288,7 @@ def overflowing(spec: LayoutSpec, work: Rect, minimums: list[Size], scale: float
 
 def fixed_kind(spec: LayoutSpec, count: int) -> LayoutSpec:
     """``spec`` with an automatic layout resolved for ``count`` windows (other layouts are returned as they are)."""
-    if spec.kind != AUTO:
+    if spec.kind not in (AUTO, ADAPTIVE):
         return spec
     fixed = LayoutSpec.from_dict(spec.to_dict())
     fixed.kind = spec.kind_for(count)
@@ -388,7 +390,7 @@ def fit_layout(spec: LayoutSpec, work: Rect, minimums: list[Size], scale: float 
     area = (work[0] + gap, work[1] + gap, work[2] - gap, work[3] - gap)
     for other in alternatives(spec, len(minimums)):
         if other.kind == BSP and ids:
-            other.bsp = bsp.to_dict(bsp.sync(None, ids, area, gap=gap))
+            other.bsp = bsp.to_dict(bsp.sync(None, ids, area, gap=gap, minimums=dict(zip(ids, minimums))))
         floating = overflowing(other, work, minimums, scale, ids)
         if len(floating) < len(out):
             best, out = other, floating

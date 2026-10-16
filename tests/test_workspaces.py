@@ -152,6 +152,23 @@ class ManagerTests(TempHomeTestCase):
                          ("2024", [], 0.0))
         self.assertEqual(self.ws.active_id, "")
 
+    def test_records_from_before_the_adaptive_engine_keep_their_layout(self):
+        old = {"kind": "main_side", "gap": 12, "ratio": 0.7, "columns": 0, "weights": [], "monitor": None, "free": {},
+               "dynamic": True, "heights": [], "bsp": {}, "auto": {"2": "side_by_side", "3": "main_side", "4": "grid"},
+               "stacks": []}  # no grid proportions, no "adaptive"
+        kept = self.ws.create("Kept", [stable_app_id("Alpha")])
+        auto = self.ws.create("Auto", [stable_app_id("Alpha")])
+        self.settings.workspaces_store.save({"workspaces": [
+            dict(kept.to_dict(), layout=old), dict(auto.to_dict(), layout=dict(old, kind="auto"))]})
+        self.build()
+        self.assertEqual((self.ws.get(kept.id).layout.kind, self.ws.get(kept.id).layout.ratio,
+                          self.ws.get(kept.id).layout.dynamic), ("main_side", 0.7, True))
+        self.assertEqual(self.ws.get(auto.id).layout.kind, "auto")  # never turned into the adaptive engine
+        self.assertEqual(self.ws.get(kept.id).layout.grid_cols, [])
+        self.ws.set_layout(kept.id, LayoutSpec("adaptive", gap=4, dynamic=True))
+        self.build()
+        self.assertEqual(self.ws.get(kept.id).layout.kind, "adaptive")  # and the new kind survives a restart
+
     def test_missing_application_keeps_its_stored_name(self):
         w = self.ws.create("W", [stable_app_id("Alpha")])
         self.registry.apply_scan([])  # Alpha vanished from the system

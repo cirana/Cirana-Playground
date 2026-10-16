@@ -74,7 +74,7 @@ class WindowManagerUiTests(unittest.TestCase):
         page.refresh()
         names = [page.tiling_kind.itemText(i) for i in range(page.tiling_kind.count())]
         self.assertIn("BSP (split per window)", names)
-        page.tiling_kind.setCurrentIndex(names.index("Automatic (by window count)"))
+        page.tiling_kind.setCurrentIndex(names.index("By window count (fixed steps)"))
         self.assertEqual(self.ctx.tiler.global_layout().kind, AUTO)
         page.refresh()
         self.assertTrue(page.tiling_auto.isVisibleTo(page))
@@ -127,7 +127,7 @@ class WindowManagerUiTests(unittest.TestCase):
         self.assertEqual(layout.kind, BSP)
         self.assertTrue(layout.bsp)  # kept
         self.assertEqual(len(layout.stacks), 1)  # kept
-        view.kind_combo.setCurrentIndex(names.index("Automatic (by window count)"))
+        view.kind_combo.setCurrentIndex(names.index("By window count (fixed steps)"))
         view.refresh()
         self.assertTrue(view.auto_picker.isVisibleTo(view))
         self.assertEqual(self.ctx.workspaces.get(workspace.id).layout.kind, AUTO)
