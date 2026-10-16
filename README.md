@@ -154,7 +154,8 @@ py -3.12 -m venv .venv
 düzen listesine eklenen bir seçenektir.
 
 **Çalıştırılabilir dosya oluşturma.** `pip install pyinstaller` ve `pyinstaller cirana.spec --noconfirm`,
-`dist\CIRANA\` altında tek klasörlü bir derleme üretir.
+`dist\CIRANA\` altında tek klasörlü bir derleme üretir. Tek dosyalık taşınabilir `dist\CIRANA.exe` için
+`pyinstaller cirana-portable.spec --noconfirm` kullanın.
 
 <br>
 

@@ -151,7 +151,7 @@ If you used an earlier version, your settings are left exactly as they are. Layo
 (adaptive)* is one more entry in the layout list.
 
 **Build an executable.** `pip install pyinstaller` and `pyinstaller cirana.spec --noconfirm` produce a one-folder build
-in `dist\CIRANA\`.
+in `dist\CIRANA\`. For a single portable `dist\CIRANA.exe`, use `pyinstaller cirana-portable.spec --noconfirm`.
 
 <br>
 
