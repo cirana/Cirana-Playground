@@ -11,6 +11,8 @@ Open something and it takes its place. No embedding, no restyling, nothing leave
 
 [Get started](#getting-started) · [See it in action](#see-it-in-action) · [Shortcuts](docs/shortcuts.md) · [Architecture](docs/architecture.md)
 
+**English** · [Türkçe](README.tr.md)
+
 </div>
 
 <!--

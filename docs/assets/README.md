@@ -5,9 +5,9 @@ The screenshots and the demo GIF still have to be captured from the real applica
 commented-out `<img>` block for each one (search for `SLOT`), so adding a file is two steps:
 
 1. Save the capture here under the exact name in the table below.
-2. In `README.md`, delete the `<!--` and `-->` lines around that slot's `<img>`.
+2. In both `README.md` and `README.tr.md`, delete the `<!--` and `-->` lines around that slot's `<img>`.
 
-Nothing in the README points at a file that does not exist yet.
+Neither README points at a file that does not exist yet.
 
 ## Shot list
 
