@@ -25,7 +25,7 @@ from cirana.core.application_registry import ApplicationRegistry
 from cirana.core.models import AppEntry
 from cirana.storage.settings_manager import SettingsManager
 from cirana.wm.identity import MatchRule, TrackedWindow
-from cirana.wm.layout import FREE, GRID, FreeSlot, LayoutSpec, to_fraction
+from cirana.wm.layout import ADAPTIVE, FREE, GRID, FreeSlot, LayoutSpec, to_fraction
 from cirana.wm.monitors import Monitor, monitor_for_rect
 
 log = logging.getLogger(__name__)
@@ -288,6 +288,9 @@ class WorkspaceManager(QObject):
         name = self._unique_name(clean_name(name))
         now = time.time()
         workspace = Workspace(f"ws-{uuid.uuid4().hex[:8]}", name, created=now, updated=now)
+        # New workspaces tile themselves with the adaptive engine once active (nothing is started or moved by
+        # creating one); stored workspaces keep whatever they have: records are read, not rewritten.
+        workspace.layout = LayoutSpec(ADAPTIVE, gap=8, dynamic=True)
         self._workspaces.append(workspace)
         for app_id in app_ids or []:
             self._add_app(workspace, app_id)

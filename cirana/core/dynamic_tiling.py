@@ -83,6 +83,7 @@ from cirana.wm.rules import FLOAT, IGNORE, WORKSPACE, WindowRule, first_match, r
 log = logging.getLogger(__name__)
 
 DEBOUNCE_MS = 150  # events within this time produce one re-tile
+STARTUP_MS = 400  # the first re-tile after the first window inventory: the burst of start-up events is one
 DISPLAY_DEBOUNCE_MS = 600  # Windows reports a display change in several steps
 RATE_LIMIT = 8  # re-tiles ...
 RATE_WINDOW = 4.0  # ... within this many seconds; beyond that, wait
@@ -217,6 +218,7 @@ class DynamicTiler(QObject):
         self._display_timer.timeout.connect(lambda: self.schedule(force=True))
 
         tracker = wm.tracker
+        tracker.inventory_ready.connect(self._on_inventory_ready)
         tracker.window_added.connect(self._on_added)
         tracker.window_removed.connect(self._on_removed)
         tracker.window_changed.connect(self._on_changed)
@@ -766,6 +768,14 @@ class DynamicTiler(QObject):
             self._raise = raise_group if isinstance(raise_group, list) else True
         self.schedule(force=True)
         return True
+
+    def _on_inventory_ready(self) -> None:
+        """The window tracker has seen every window once: only now can anything be arranged (a layout computed from a
+        half-known desktop would be redone, and flicker)."""
+        self._signature = None
+        self._force = True
+        if self.in_charge():
+            self._timer.start(STARTUP_MS)
 
     def _on_added(self, window: TrackedWindow) -> None:
         self._shown[window.key] = (window.minimized, window.maximized, window.resizable)
@@ -1553,6 +1563,8 @@ class DynamicTiler(QObject):
         if not self.in_charge():
             self._force, self._raise, self._user, self._focus_after = False, False, False, None
             return
+        if not self.wm.tracker.ready:
+            return  # the first window inventory is not in yet; its arrival schedules this again
         if self._dragging:
             return  # the end of the drag schedules the re-tile
         groups = self._groups()

@@ -68,6 +68,9 @@ class SettingsManager:
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root else data_dir()
+        # A first run: no data file of an earlier CIRANA exists. Decided before anything is created or saved.
+        self.fresh = not any((self.root / name).exists()
+                             for name in ("config.json", "workspaces.json", "applications.json"))
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "cache").mkdir(exist_ok=True)
         (self.root / "logs").mkdir(exist_ok=True)
@@ -110,6 +113,17 @@ class SettingsManager:
         path = self.root / "cache" / "icons"
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def apply_first_run_defaults(self) -> bool:
+        """New installations start with all-window tiling on (its layout is the adaptive engine unless a layout was
+        stored). Settings that exist - from any earlier version, also an off switch - are never touched: a
+        configuration, workspace or application file is what tells an old user from a new one. True when the defaults were applied."""
+        if not self.fresh or getattr(self, "_defaults_applied", False):
+            return False
+        self._defaults_applied = True
+        self.set("global_tiling", True)
+        self.save_config()  # from now on this installation has a configuration of its own
+        return True
 
     def save_config(self) -> None:
         self.config_store.save(self.config)

@@ -43,6 +43,7 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
     app.setStyleSheet(build_stylesheet())
 
     settings = SettingsManager()
+    settings.apply_first_run_defaults()  # a new installation: all-window tiling is on; old settings stay as they are
     setup_logging(settings.root)
     log.info("DPI awareness: %s", win32_api.process_dpi_awareness())
     registry = ApplicationRegistry(settings)

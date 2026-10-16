@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 from cirana.core.models import AppEntry, stable_app_id  # noqa: E402
 from cirana.core.workspace_controller import EntryState  # noqa: E402
 from cirana.widgets.dnd import APP_MIME, entry_mime  # noqa: E402
-from cirana.wm.layout import FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE  # noqa: E402
+from cirana.wm.layout import FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec  # noqa: E402
 from tests.fake_desktop import FakeDesktop  # noqa: E402
 
 
@@ -156,8 +156,10 @@ class UiTests(unittest.TestCase):
         alpha = self.desktop.add("c:\\nosuchfolder\\alpha.exe", "Alpha")
         other = self.desktop.add("c:\\other\\other.exe", "Other", rect=(1, 1, 300, 300))
         self.sync()
+        self.addCleanup(self.ctx.tiler.set_global, True)
+        self.ctx.tiler.set_global(False)  # (a new installation tiles every window; this test is about the manual button)
         workspace = self.ctx.workspaces.create("Go", [stable_app_id("Alpha")])
-        self.ctx.workspaces.set_layout(workspace.id, self.ctx.workspaces.get(workspace.id).layout)
+        self.ctx.workspaces.set_layout(workspace.id, LayoutSpec(GRID, gap=8))
         self.show(workspace.id)
         self.view.activate_button.click()
         self.assertTrue(self.pump(lambda: not self.ctx.wm.busy(workspace.id)))
@@ -167,9 +169,13 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.ctx.workspaces.active_id, workspace.id)
 
     def test_dynamic_tiling_switch(self):
+        self.addCleanup(self.ctx.tiler.set_global, True)
+        self.ctx.tiler.set_global(False)  # all-window tiling (on in a new installation) would be in charge instead
         workspace = self.ctx.workspaces.create("Tiles", [stable_app_id("Alpha")])
         self.show(workspace.id)
-        self.assertFalse(self.view.dynamic_check.isChecked())
+        self.assertTrue(self.view.dynamic_check.isChecked())  # new workspaces start with dynamic tiling on
+        self.view.dynamic_check.setChecked(False)
+        self.assertFalse(self.ctx.workspaces.get(workspace.id).layout.dynamic)
         self.view.dynamic_check.setChecked(True)
         self.assertTrue(self.ctx.workspaces.get(workspace.id).layout.dynamic)
         self.view.refresh()
@@ -314,7 +320,9 @@ class UiTests(unittest.TestCase):
         self.window.show_page("windows", save=False)
         page = self.window.pages["windows"]
         page.refresh()
-        self.assertFalse(page.tile_all.isChecked())
+        self.assertTrue(page.tile_all.isChecked())  # a new installation tiles every window by itself
+        self.assertEqual(page.tiling_kind.currentText(), "Automatic (adaptive)")
+        page.tile_all.setChecked(False)
         self.assertIn("Off", page.tiling_state.text())
         page.tiling_kind.setCurrentIndex(0)  # side by side
         page.tile_all.setChecked(True)
