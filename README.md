@@ -193,6 +193,23 @@ tree, so they come back whenever the engine returns to that layout). Choosing an
 for that scope - dynamic tiling goes on inside your layout - and choosing *Automatic (adaptive)* again starts it.
 The Windows page shows what it uses. Windows that fit no layout float, with the reason, as before.
 
+**Animations (`wm/animation.py`, Settings -> Animations).** Purely visual, on by default, 180 ms (0-350; 0 = the old
+immediate placement), ease-out cubic, about 30 frames a second. A re-tile first glides the windows that move
+(`DynamicTiler._glide`, on the re-tile's worker thread, never the GUI thread; each frame is the controller's
+asynchronous `SetWindowPos`), all of them on one clock, then the normal `place_all` puts every window at its exact
+target and verifies it - so final coordinates, minimum-size learning (`CONSTRAINED`), floating and every layout
+decision are the same with and without animation. Frames are time based (a late frame jumps ahead instead of
+queueing), a frame equal to the last one is not sent, and every frame checks that the window is still the same one
+(handle reuse), responding and not refused. Minimized, maximized, full-screen, off-screen windows, windows moving to a
+monitor with another scale and refused / hung ones are not animated, just placed. A newer layout, a drag or quitting
+cancels the glide between two frames; the next one starts from where the windows are, windows left half way are
+placed exactly (never "close enough"), and tiling switched off or CIRANA quitting snaps them to their targets.
+While you hold a window nothing is re-tiled, so nothing glides; the layout's targets are known when a glide starts, so
+keyboard commands during it (a second swap) see the new layout. Focus borders fade between grey and green in 120 ms and
+the drop preview glides between targets in 100 ms (both with their own switch); a preview with no valid target, or a
+finished drag, disappears at once. Not animated: *Apply layout* and workspace activation without dynamic tiling (they
+place windows directly).
+
 **Smart BSP.** A new window still splits the focused tile along its longer side when that is a good tiling. When it
 would break a minimum size, make a sliver or an awkward tile, every tile and both directions (and a ratio from the
 two minimums) are compared (`bsp.insert`) and the cheapest wins; nothing else in the tree changes, so ratios you set

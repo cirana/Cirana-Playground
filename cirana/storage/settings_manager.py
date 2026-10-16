@@ -31,6 +31,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "focus_follows_mouse": False,  # cirana.core.focus_follows_mouse
     "ffm_delay": 150,
     "ffm_raise": False,
+    "animations": True,  # smooth window / border / preview transitions (cirana.wm.animation)
+    "animation_ms": 180,  # 0 - 350; 0 = windows jump to their place at once
+    "animation_border": True,  # focus border colour fades
+    "animation_preview": True,  # the drop preview glides between targets
     "ffm_restore": {},  # the user's own values while CIRANA has changed them (repaired after a crash)
 }
 

@@ -50,6 +50,7 @@ class Env(TempHomeTestCase):
 
     def build(self):
         self.settings = SettingsManager(self.home)
+        self.settings.set("animation_ms", 0)  # windows jump to their place: tests read positions (see test_animation)
         self.registry = ApplicationRegistry(self.settings)
         self.registry.apply_scan([exe_app("Code"), exe_app("Brave"), exe_app("Notes"),
                                   exe_app("Shell", "C:\\Windows\\System32\\powershell.exe")])

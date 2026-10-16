@@ -70,7 +70,7 @@ from cirana.core.background import Job, run_async
 from cirana.core.workspace_controller import EntryState, WorkspaceController
 from cirana.native import win32_api as w32
 from cirana.storage.json_store import JsonStore
-from cirana.wm import adaptive, bsp
+from cirana.wm import adaptive, animation, bsp
 from cirana.wm.controller import TOLERANCE, Placement, Result, Status
 from cirana.wm.identity import Rect, TrackedWindow
 from cirana.wm.layout import (ADAPTIVE, BSP, GRID, KIND_NAMES, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, Resize, Size, clamp_into,
@@ -182,6 +182,9 @@ class DynamicTiler(QObject):
         self._dragging: set[str] = set()  # keys of tiled windows the user is dragging / resizing
         self._drag_start: dict[str, Rect] = {}  # window key -> its visible frame when the drag started
         self._denied: set[str] = set()  # windows Windows refuses to let CIRANA move: left out of the layout
+        # hwnd -> (window, outer rectangle at its target) of windows an animation has moved and the placement has not
+        # confirmed yet: placed exactly (no tolerance) and snapped there if CIRANA stops meanwhile
+        self._animated: dict[int, tuple[TrackedWindow, tuple]] = {}
         self._reported: set[tuple[str, str]] = set()  # (window key, status) already announced
         self._targets: dict[str, tuple[str, Rect]] = {}  # unit id -> (group id, rect of the last re-tile)
         self._order: list[str] = []  # all-window tiling: window keys in the order they joined
@@ -1562,6 +1565,9 @@ class DynamicTiler(QObject):
     def _evaluate(self) -> None:
         if not self.in_charge():
             self._force, self._raise, self._user, self._focus_after = False, False, False, None
+            if self._animated:
+                self._cancel()
+                self._finish_glide()  # tiling was switched off in mid-glide: nobody is left half way
             return
         if not self.wm.tracker.ready:
             return  # the first window inventory is not in yet; its arrival schedules this again
@@ -1617,9 +1623,14 @@ class DynamicTiler(QObject):
         backend, controller = self.wm.tracker.backend, self.wm.windows
         behind = self.stack_mode == BEHIND
         plan = self.plan
+        glide = 0 if self._user_drag_active() else animation.duration_ms(self.settings)
         out_of_sight = {window.key for group in groups for unit in group.units + [u for u, _ in group.floating]
                         for _slot, window in unit.hidden()}
         self.count += 1
+        if glide:  # the targets are known now: commands that come before the glide is over (a second swap) use them
+            monitors = self._monitors()
+            self._targets = {unit.id: (group.id, rect) for group in groups
+                             for unit, rect in self.plan(group, group.units, monitors)}
 
         def already(placement: Placement) -> Result | None:
             """The window is exactly where it belongs: it is not touched again (fewer moves, no flicker)."""
@@ -1627,8 +1638,8 @@ class DynamicTiler(QObject):
             if backend.is_minimized(hwnd) or backend.is_maximized(hwnd):
                 return None
             frame = backend.frame_rect(hwnd)
-            if _off_by(frame, placement.rect) > TOLERANCE:
-                return None
+            if _off_by(frame, placement.rect) > (0 if hwnd in self._animated else TOLERANCE):
+                return None  # (a window left in mid-glide by a cancelled animation is never "close enough")
             return Result(placement.window.key, placement.window.display_title, Status.PLACED, actual=frame)
 
         def job(cancel):  # noqa: ANN001 - worker thread
@@ -1662,6 +1673,10 @@ class DynamicTiler(QObject):
             for placement in placements:
                 results.append(None if controller.check(placement.window) else already(placement))
             moving = [p for p, r in zip(placements, results) if r is None]
+            if glide and moving and not cancel.is_set():
+                self._glide(moving, cancel, glide)  # (visual only: the placement below is the same either way)
+                if cancel.is_set():
+                    return [], [], []  # a newer layout (or a drag, or quitting) took over: it places the windows
             moved = iter(controller.place_all(moving, cancel) if moving else [])
             results = [r if r is not None else next(moved) for r in results]
             if not cancel.is_set():
@@ -1681,12 +1696,54 @@ class DynamicTiler(QObject):
                         backend.raise_window(window.hwnd)
                 if focus_after is not None:
                     controller.focus(focus_after)
+            if not cancel.is_set():
+                self._animated.clear()  # every window is where the placement put it
             targets = [(unit_id, (group_id, p.rect)) for group_id, unit_id, _s, p, primary in planned if primary]
             tiled = [(slot, result) for (_g, _u, slot, _p, _primary), result in zip(planned, results)] + refused
             return targets, tiled, list(zip([slot for slot, _p in floats], results[len(planned):]))
 
         self._job = run_async(job, lambda outcome: self._done(scope, generation, outcome),
                               lambda error: self._failed(generation, error))
+
+    def _finish_glide(self) -> None:
+        """Windows an animation left half way get their exact places at once (tiling stops, CIRANA quits)."""
+        controller = self.wm.windows
+        for window, outer in list(self._animated.values()):
+            try:
+                if controller.check(window) is None:
+                    controller.nudge(window, outer)
+            except Exception:  # noqa: BLE001 - one window's problem never keeps the others half way
+                log.debug("Could not finish a window animation", exc_info=True)
+        self._animated.clear()
+
+    def _user_drag_active(self) -> bool:
+        return bool(self._dragging)
+
+    def _glide(self, moving: list[Placement], cancel, milliseconds: int) -> None:  # noqa: ANN001 - worker thread
+        """Move the windows that are about to be placed smoothly towards their targets (see cirana.wm.animation).
+        Windows that cannot be animated safely are left out and just placed afterwards."""
+        backend, controller = self.wm.tracker.backend, self.wm.windows
+        try:
+            monitors = backend.monitors()
+            moves = []
+            for placement in moving:
+                window, hwnd = placement.window, placement.window.hwnd
+                if backend.is_minimized(hwnd) or backend.is_maximized(hwnd):
+                    continue
+                start = backend.frame_rect(hwnd)
+                here, there = monitor_for_rect(start, monitors), monitor_for_rect(placement.rect, monitors)
+                if here is None or there is None or here.dpi != there.dpi or start == here.rect \
+                        or _off_by(start, placement.rect) <= TOLERANCE:
+                    continue  # off screen, full screen, another scale (the application resizes itself) or there
+                moves.append(animation.Move(window, backend.window_rect(hwnd),
+                                            controller.outer_frame(window, placement.rect)))
+            if moves:
+                for move in moves:
+                    self._animated[move.window.hwnd] = (move.window, move.end)
+                animation.run_animation(moves, lambda m, rect: controller.nudge(m.window, rect), cancel,
+                                        milliseconds / 1000.0, lambda m: backend.still_same(m.window) and not backend.is_hung(m.window.hwnd))
+        except Exception:  # noqa: BLE001 - an animation problem must never cost the placement
+            log.debug("Window animation failed", exc_info=True)
 
     def _failed(self, generation: int, error: str) -> None:
         if generation == self._generation:
@@ -1752,4 +1809,5 @@ class DynamicTiler(QObject):
         self._timer.stop()
         self._display_timer.stop()
         self._cancel()
+        self._finish_glide()
         self._release_hidden()

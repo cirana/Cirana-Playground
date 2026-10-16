@@ -578,3 +578,28 @@ class LiveThirdWindowAndResizeTests(unittest.TestCase):
         count = tiler.count
         self.wait(lambda: False, 1.0)
         self.assertEqual(tiler.count, count)  # no loop afterwards
+
+    def test_windows_glide_on_the_real_desktop_and_end_exactly_in_place(self):
+        from cirana.wm.layout import SIDE_BY_SIDE, LayoutSpec
+
+        tracker, tiler, hwnds, monitor = self.start(2)
+        tiler.settings.set("animation_ms", 350)
+        tiler.set_global_layout(LayoutSpec(SIDE_BY_SIDE, gap=10))
+        tiler.set_global(True)
+        seen = []
+        end = time.monotonic() + 12.0
+        while time.monotonic() < end:
+            self.app.processEvents()
+            seen.append([tracker.backend.frame_rect(h) for h in hwnds])
+            frames = seen[-1]
+            if time.monotonic() > end - 9.5 and self.apart(frames) and abs((frames[0][2] - frames[0][0])
+                                                                           - (frames[1][2] - frames[1][0])) <= 2:
+                break
+            time.sleep(0.01)
+        self.wait(lambda: False, 1.0)
+        final = [tracker.backend.frame_rect(h) for h in hwnds]
+        self.assertTrue(self.apart(final), final)
+        widths = {tuple(f[2] - f[0] for f in frames) for frames in seen}
+        self.assertGreater(len(widths), 3, "the windows jumped instead of gliding")
+        self.assertEqual(tiler._animated, {})
+        self.assertIsNone(tiler._job)

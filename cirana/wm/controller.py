@@ -96,6 +96,16 @@ class WindowController:
             margins = (0, 0, 0, 0)
         return frame[0] - margins[0], frame[1] - margins[1], frame[2] + margins[2], frame[3] + margins[3]
 
+    def outer_frame(self, window: TrackedWindow, frame: Rect) -> Rect:
+        """The window rectangle whose visible frame is ``frame`` (for animations, which glide outer rectangles)."""
+        return self._outer(window.hwnd, frame)
+
+    def nudge(self, window: TrackedWindow, outer: Rect) -> bool:
+        """One animation frame: the asynchronous request only, nothing is verified (``place_all`` does that at the
+        end). False when Windows refused it, so the window leaves the animation."""
+        ok, _code = self.backend.set_pos(window.hwnd, outer)
+        return ok
+
     def _post(self, placement: Placement, monitors: list) -> Result | None:  # noqa: ANN001
         """Send one window on its way. A Result when it was refused right away."""
         backend, hwnd = self.backend, placement.window.hwnd

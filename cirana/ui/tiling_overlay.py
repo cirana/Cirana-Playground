@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, QRect, QRectF, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QObject, QRect, QRectF, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget
 
 from cirana.ui.theme import COLORS
+from cirana.wm import animation
 from cirana.wm.identity import Rect, TrackedWindow
 from cirana.wm.monitors import Monitor, monitor_for_rect
 
@@ -103,16 +104,55 @@ class BorderOverlay(_Overlay):
         self.thickness = BORDER_PX
         self.stack: tuple[int, int] | None = None  # (index of the shown window, windows in the stack)
         self.monocle = False
+        self.mix = 0.0  # 0 = the inactive colour, 1 = the active one (in between while it fades)
+        self._fade: QVariantAnimation | None = None
 
-    def set_active(self, active: bool) -> None:
-        if active != self.active:
-            self.active = active
+    def set_active(self, active: bool, fade_ms: int = 0) -> None:
+        """``fade_ms``: change the colour smoothly (the border is already shown); 0: at once."""
+        if active == self.active and self._fade is None:
+            return
+        self.active = active
+        goal = 1.0 if active else 0.0
+        self.stop_fade()
+        if fade_ms <= 0 or not self.isVisible() or self.mix == goal:
+            self.mix = goal
             self.update()  # repaint only when the colour really changes
+            return
+        fade = QVariantAnimation(self)
+        fade.setStartValue(self.mix)
+        fade.setEndValue(goal)
+        fade.setDuration(fade_ms)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        fade.valueChanged.connect(self._faded)
+        fade.finished.connect(self._fade_done)
+        self._fade = fade
+        fade.start()
+
+    def _faded(self, value: object) -> None:
+        self.mix = float(value)
+        self.update()
+
+    def _fade_done(self) -> None:
+        self.mix = 1.0 if self.active else 0.0
+        self._fade = None
+        self.update()
+
+    def stop_fade(self) -> None:
+        if self._fade is not None:
+            self._fade.stop()
+            self._fade.deleteLater()
+            self._fade = None
 
     def set_mode(self, stack: tuple[int, int] | None, monocle: bool) -> None:
         if (stack, monocle) != (self.stack, self.monocle):
             self.stack, self.monocle = stack, monocle
             self.update()
+
+    def _color(self) -> QColor:
+        a, b = QColor(INACTIVE_COLOR), QColor(ACTIVE_COLOR)
+        m = self.mix
+        return QColor(round(a.red() + (b.red() - a.red()) * m), round(a.green() + (b.green() - a.green()) * m),
+                      round(a.blue() + (b.blue() - a.blue()) * m))
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -123,7 +163,7 @@ class BorderOverlay(_Overlay):
         path.addRoundedRect(outer, width * 2, width * 2)
         inner = QPainterPath()
         inner.addRect(outer.adjusted(width, width, -width, -width))
-        painter.fillPath(path.subtracted(inner), QColor(ACTIVE_COLOR if self.active else INACTIVE_COLOR))
+        painter.fillPath(path.subtracted(inner), self._color())
         if self.stack is not None:  # one tab per stacked window, centred on the top edge
             shown, count = self.stack
             tab, space = width * 10, width * 2
@@ -137,6 +177,38 @@ class BorderOverlay(_Overlay):
 class PreviewOverlay(_Overlay):
     def __init__(self) -> None:
         super().__init__(on_top=True)
+        self.target_px: Rect | None = None  # where it is going (``rect_px`` is where it is drawn right now)
+        self._glide: QVariantAnimation | None = None
+
+    def stop_glide(self) -> None:
+        if self._glide is not None:
+            self._glide.stop()
+            self._glide.deleteLater()
+            self._glide = None
+
+    def glide_to(self, rect: Rect, scale: float, ms: int) -> None:
+        """Move the preview to ``rect`` smoothly (a new target during a glide continues from where it is drawn)."""
+        self.stop_glide()
+        self.target_px = rect
+        start = self.rect_px
+        if ms <= 0 or start is None or not self.isVisible() or start == rect:
+            self.place(rect, scale)
+            return
+        glide = QVariantAnimation(self)
+        glide.setStartValue(0.0)
+        glide.setEndValue(1.0)
+        glide.setDuration(ms)
+        glide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        glide.valueChanged.connect(lambda p: self.place(animation.lerp_rect(start, rect, float(p)), scale))
+        glide.finished.connect(lambda: (self.place(rect, scale), self.stop_glide()))
+        self._glide = glide
+        glide.start()
+
+    def hide_now(self) -> None:
+        self.stop_glide()
+        self.target_px = None
+        self.hide()
+        self.rect_px = None
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -226,7 +298,7 @@ class TilingOverlays(QObject):
             border = self.borders.get(key)
             if border is None:
                 border = self.borders[key] = BorderOverlay()
-            border.set_active(key == focused)
+            border.set_active(key == focused, self._border_ms())
             found = self.tiler.tile_of(key)
             stack = monocle = None
             if found is not None:
@@ -251,6 +323,7 @@ class TilingOverlays(QObject):
     def _drop(self, key: str) -> None:
         border = self.borders.pop(key, None)
         if border is not None:
+            border.stop_fade()
             border.hide()
             border.deleteLater()
 
@@ -271,7 +344,7 @@ class TilingOverlays(QObject):
     def _on_focus(self, key: str) -> None:
         monitors = None
         for border_key, border in self.borders.items():
-            border.set_active(border_key == key)
+            border.set_active(border_key == key, self._border_ms())
             if border_key == key:  # the focused window came to the front: its border goes right above it
                 window = self.tracker.get(key)
                 if window is not None:
@@ -281,11 +354,14 @@ class TilingOverlays(QObject):
     # -- drop preview -------------------------------------------------------------------------------------------
     def _on_preview(self, rect: Rect | None) -> None:
         if rect is None or self._stopped:
-            self.preview.hide()
-            self.preview.rect_px = None
+            self.preview.hide_now()  # no target (or the drag is over): gone at once, no glide left behind
             return
         monitor = monitor_for_rect(rect, self._monitors())
-        self.preview.place(rect, monitor.scale if monitor is not None else 1.0)  # stays on top by itself
+        self.preview.glide_to(rect, monitor.scale if monitor is not None else 1.0,
+                              animation.flag(self.settings, "animation_preview", animation.PREVIEW_MS))
+
+    def _border_ms(self) -> int:
+        return animation.flag(self.settings, "animation_border", animation.BORDER_MS)
 
     def _on_neighbors(self, rects: list[Rect] | None) -> None:
         """While a tile is resized: the grey boxes of the other tiles, where they will be after the release."""
@@ -297,18 +373,15 @@ class TilingOverlays(QObject):
             monitor = monitor_for_rect(rect, monitors)
             overlay.place(rect, monitor.scale if monitor is not None else 1.0)
         for overlay in self.neighbors[len(rects):]:
-            overlay.hide()
-            overlay.rect_px = None
+            overlay.hide_now()
 
     # -- shutdown -----------------------------------------------------------------------------------------------
     def clear(self) -> None:
         for key in list(self.borders):
             self._drop(key)
-        self.preview.hide()
-        self.preview.rect_px = None
+        self.preview.hide_now()
         for overlay in self.neighbors:
-            overlay.hide()
-            overlay.rect_px = None
+            overlay.hide_now()
 
     def stop(self) -> None:
         self._stopped = True

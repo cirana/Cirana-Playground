@@ -17,6 +17,7 @@ from cirana.core.models import LaunchType
 from cirana.ui.common import label, make_scroll
 from cirana.ui.context import AppContext
 from cirana.ui.wm_dialogs import RuleDialog, ShortcutsDialog
+from cirana.wm import animation
 from cirana.wm.rules import ACTION_NAMES, WORKSPACE
 
 
@@ -110,6 +111,33 @@ class SettingsView(QWidget):
         lay.addLayout(row)
         root.addWidget(card)
 
+        card, lay = _card("Animations",
+                          "Windows glide to their new places, focus borders fade and the drop preview moves "
+                          "smoothly. With 0 ms windows jump to their place at once.")
+        row = QHBoxLayout()
+        self.anim_on = QCheckBox("Animate window movement")
+        self.anim_on.toggled.connect(self._animation_edited)
+        row.addWidget(self.anim_on)
+        self.anim_ms = QSpinBox()
+        self.anim_ms.setRange(0, animation.MAX_MS)
+        self.anim_ms.setSingleStep(10)
+        self.anim_ms.setSuffix(" ms")
+        self.anim_ms.setToolTip("How long a window takes to reach its place (0 = no animation)")
+        self.anim_ms.valueChanged.connect(self._animation_edited)
+        row.addWidget(self.anim_ms)
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        self.anim_border = QCheckBox("Fade the focus border")
+        self.anim_border.toggled.connect(self._animation_edited)
+        row.addWidget(self.anim_border)
+        self.anim_preview = QCheckBox("Animate the drop preview")
+        self.anim_preview.toggled.connect(self._animation_edited)
+        row.addWidget(self.anim_preview)
+        row.addStretch(1)
+        lay.addLayout(row)
+        root.addWidget(card)
+
         card, lay = _card("Window rules",
                           "What CIRANA does with a program's windows: float them, ignore them completely, or "
                           "make them part of a workspace. The first matching rule wins.")
@@ -127,6 +155,7 @@ class SettingsView(QWidget):
         lay.addLayout(row)
         root.addWidget(card)
         self._syncing = False
+        self._sync_animation()
         ctx.hotkeys.status_changed.connect(self._sync_window_management)
 
         # Categories
@@ -212,6 +241,32 @@ class SettingsView(QWidget):
             (f"{'' if rule.enabled else '(off) '}{rule.label} — {ACTION_NAMES[rule.action]}"
              + (f": {names.get(rule.workspace_id, 'missing workspace')}" if rule.action == WORKSPACE else ""),
              rule.id) for rule in ctx.tiler.rules()])
+
+    def _sync_animation(self) -> None:
+        settings = self.ctx.settings
+        self._syncing = True
+        try:
+            self.anim_on.setChecked(settings.get("animations") is not False)
+            self.anim_ms.setValue(animation.duration_ms(settings) if settings.get("animations") is not False
+                                  else int(min(animation.MAX_MS, max(0, settings.get("animation_ms") or 0))))
+            self.anim_border.setChecked(settings.get("animation_border") is not False)
+            self.anim_preview.setChecked(settings.get("animation_preview") is not False)
+        finally:
+            self._syncing = False
+        on = self.anim_on.isChecked()
+        self.anim_ms.setEnabled(on)
+        self.anim_border.setEnabled(on)
+        self.anim_preview.setEnabled(on)
+
+    def _animation_edited(self, _value: object = None) -> None:
+        if self._syncing:
+            return
+        settings = self.ctx.settings
+        settings.set("animations", self.anim_on.isChecked())
+        settings.set("animation_ms", self.anim_ms.value())
+        settings.set("animation_border", self.anim_border.isChecked())
+        settings.set("animation_preview", self.anim_preview.isChecked())
+        self._sync_animation()
 
     def _ffm_edited(self, _value: object = None) -> None:
         if not self._syncing:
