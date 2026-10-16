@@ -352,6 +352,12 @@ class WorkspaceManager(QObject):
         before = len(workspace.apps)
         workspace.apps = [a for a in workspace.apps if a.id != entry_id]
         workspace.layout.free.pop(entry_id, None)
+        for stack in workspace.layout.stacks:
+            if entry_id in stack["members"]:
+                stack["members"].remove(entry_id)
+                if stack["active"] == entry_id and stack["members"]:
+                    stack["active"] = stack["members"][0]
+        workspace.layout.stacks = [s for s in workspace.layout.stacks if len(s["members"]) >= 2]
         if len(workspace.apps) != before:
             self._touch_save(workspace)
 
@@ -407,6 +413,20 @@ class WorkspaceManager(QObject):
         layout.free = layout.free or workspace.layout.free  # switching to a tiled layout keeps saved positions
         workspace.layout = layout
         self._touch_save(workspace)
+
+    def update_tiling(self, workspace_id: str, **fields: Any) -> None:
+        """Store what dynamic tiling keeps for the workspace: its BSP tree, stacks and the proportions changed with
+        the keyboard (``bsp``, ``stacks``, ``weights``, ``ratio``, ``heights``). Not a user edit (``updated`` is
+        kept)."""
+        workspace = self._require(workspace_id)
+        allowed = {"bsp", "stacks", "weights", "ratio", "heights"}
+        changed = False
+        for key, value in fields.items():
+            if key in allowed and getattr(workspace.layout, key) != value:
+                setattr(workspace.layout, key, value)
+                changed = True
+        if changed:
+            self._save()
 
     def save_positions(self, workspace_id: str, slots: dict[str, FreeSlot]) -> None:
         """Store where the windows are now as the workspace's "saved positions" layout."""

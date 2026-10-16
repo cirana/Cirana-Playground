@@ -49,6 +49,7 @@ class FakeDesktop:
     windows: dict[int, FakeWindow] = field(default_factory=dict)
     calls: list[tuple] = field(default_factory=list)
     foreground: int = 0
+    foreground_locked: bool = False
     _next_hwnd: int = 0x1000
 
     # -- building the scene ---------------------------------------------------------------------------------------
@@ -185,5 +186,10 @@ class FakeDesktop:
 
     def set_foreground(self, hwnd: int) -> bool:
         self.calls.append(("foreground", hwnd))
+        if self.foreground_locked:
+            return False  # Windows' foreground lock: CIRANA did not receive the last input
         self.foreground = hwnd
         return True
+
+    def foreground_window(self) -> int:
+        return self.foreground if self.foreground in self.windows else 0

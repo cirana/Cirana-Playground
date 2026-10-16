@@ -8,6 +8,9 @@ Minimum sizes: many applications refuse to become smaller than a minimum (WM_GET
 left / top edge CIRANA asked for and lets the window grow to the right and down, over its neighbours or off the screen.
 Tiled layouts can take known minimums (``minimums``) into account: every tile gets at least its window's minimum and
 the rest of the space is shared as usual. :func:`overflowing` says which windows cannot be tiled at all.
+
+BSP layouts (``cirana.wm.bsp``) split the space window by window; *automatic* picks a layout from the number of
+windows (``auto``: e.g. two side by side, three main + side panel, four or more a grid or BSP).
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from cirana.wm import bsp
 from cirana.wm.identity import Rect
 from cirana.wm.monitors import MonitorRef
 
@@ -22,8 +26,14 @@ SIDE_BY_SIDE = "side_by_side"
 MAIN_SIDE = "main_side"
 GRID = "grid"
 FREE = "free"
-KINDS = (SIDE_BY_SIDE, MAIN_SIDE, GRID, FREE)
-KIND_NAMES = {SIDE_BY_SIDE: "Side by side", MAIN_SIDE: "Main + side panel", GRID: "Grid", FREE: "Saved positions"}
+BSP = "bsp"
+AUTO = "auto"
+KINDS = (SIDE_BY_SIDE, MAIN_SIDE, GRID, FREE, BSP, AUTO)
+KIND_NAMES = {SIDE_BY_SIDE: "Side by side", MAIN_SIDE: "Main + side panel", GRID: "Grid", FREE: "Saved positions",
+              BSP: "BSP (split per window)", AUTO: "Automatic (by window count)"}
+AUTO_KINDS = (SIDE_BY_SIDE, MAIN_SIDE, GRID, BSP)  # what automatic may pick
+AUTO_STEPS = ("2", "3", "4")  # automatic: the layout for 2, 3, and 4 or more windows (1 window fills the area)
+DEFAULT_AUTO = {"2": SIDE_BY_SIDE, "3": MAIN_SIDE, "4": GRID}
 MAX_GAP = 64
 
 
@@ -65,15 +75,32 @@ class LayoutSpec:
     # Dynamic tiling: while the workspace is active, re-tile whenever its windows open, close, minimize or restore
     # (tiled layouts only; see cirana.core.dynamic_tiling). Off by default and for records written before it existed.
     dynamic: bool = False
+    heights: list[float] = field(default_factory=list)  # main + side: relative heights of the side windows
+    bsp: dict[str, Any] = field(default_factory=dict)  # BSP: the stored tree (cirana.wm.bsp.to_dict); {} = default
+    auto: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_AUTO))  # automatic: window count -> kind
+    # Window stacks (several windows in one tile): [{"id", "members": [entry ids], "active": entry id}]
+    stacks: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def tiled(self) -> bool:
         return self.kind != FREE
 
+    def kind_for(self, count: int) -> str:
+        """The concrete layout used for ``count`` tiles (automatic resolves by count; saved positions tile as a
+        grid where a tiled layout is needed)."""
+        if self.kind == AUTO:
+            if count <= 1:
+                return SIDE_BY_SIDE
+            step = str(min(count, 4))
+            return self.auto.get(step, DEFAULT_AUTO[step])
+        return GRID if self.kind == FREE else self.kind
+
     def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "gap": self.gap, "ratio": self.ratio, "columns": self.columns,
                 "weights": list(self.weights), "monitor": self.monitor.to_dict() if self.monitor else None,
-                "free": {key: slot.to_dict() for key, slot in self.free.items()}, "dynamic": self.dynamic}
+                "free": {key: slot.to_dict() for key, slot in self.free.items()}, "dynamic": self.dynamic,
+                "heights": list(self.heights), "bsp": dict(self.bsp), "auto": dict(self.auto),
+                "stacks": [dict(stack, members=list(stack["members"])) for stack in self.stacks]}
 
     @classmethod
     def from_dict(cls, raw: Any) -> "LayoutSpec":
@@ -86,8 +113,14 @@ class LayoutSpec:
                 return default
             return min(high, max(low, float(value)))
 
+        def positive(values: Any) -> list[float]:
+            return [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) and v > 0] if isinstance(values, list) else []
+
         kind = raw.get("kind") if raw.get("kind") in KINDS else GRID
-        weights = raw.get("weights")
+        auto_raw = raw.get("auto") if isinstance(raw.get("auto"), dict) else {}
+        auto = {step: auto_raw[step] if auto_raw.get(step) in AUTO_KINDS else DEFAULT_AUTO[step]
+                for step in AUTO_STEPS}
         free_raw = raw.get("free")
         free = {}
         for key, value in (free_raw.items() if isinstance(free_raw, dict) else ()):
@@ -97,10 +130,28 @@ class LayoutSpec:
         return cls(
             kind=kind, gap=int(number("gap", 8, 0, MAX_GAP)), ratio=number("ratio", 0.6, 0.2, 0.8),
             columns=int(number("columns", 0, 0, 8)),
-            weights=[float(v) for v in weights if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0]
-            if isinstance(weights, list) else [],
+            weights=positive(raw.get("weights")),
             monitor=MonitorRef.from_dict(raw.get("monitor")), free=free, dynamic=raw.get("dynamic") is True,
+            heights=positive(raw.get("heights")), bsp=bsp.to_dict(bsp.from_dict(raw.get("bsp"))), auto=auto,
+            stacks=read_stacks(raw.get("stacks")),
         )
+
+
+def read_stacks(raw: Any) -> list[dict[str, Any]]:
+    """Stored stacks; damaged ones (fewer than two members, a member in two stacks) are dropped."""
+    stacks, used = [], set()
+    for item in raw if isinstance(raw, list) else ():
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+            continue
+        members = item.get("members")
+        members = [m for m in dict.fromkeys(members) if isinstance(m, str) and m and m not in used] \
+            if isinstance(members, list) else []
+        if len(members) < 2:
+            continue
+        used.update(members)
+        active = item.get("active") if item.get("active") in members else members[0]
+        stacks.append({"id": item["id"], "members": members, "active": active})
+    return stacks
 
 
 Size = tuple[int, int]  # width, height in physical pixels (0: no minimum)
@@ -158,9 +209,11 @@ def _split(start: int, end: int, weights: list[float], gap: int,
 
 
 def tile(spec: LayoutSpec, work: Rect, count: int, scale: float = 1.0,
-         minimums: list[Size] | None = None) -> list[Rect]:
+         minimums: list[Size] | None = None, ids: list[str] | None = None) -> list[Rect]:
     """Rectangles for ``count`` windows of a tiled layout inside the work area ``work``. ``minimums``: per window,
-    the smallest frame it accepts (physical pixels); its tile is made at least that large where the space allows."""
+    the smallest frame it accepts (physical pixels); its tile is made at least that large where the space allows.
+    ``ids``: the tiles' names, in order (BSP: the leaves of ``spec.bsp``; names missing from it are added the way
+    new windows are, leaves that are not named are left out)."""
     if count <= 0:
         return []
     gap = round(spec.gap * scale)
@@ -171,7 +224,13 @@ def tile(spec: LayoutSpec, work: Rect, count: int, scale: float = 1.0,
         return [(left, top, right, bottom)]
     mins = list(minimums[:count]) + [(0, 0)] * (count - len(minimums[:count])) if minimums else None
     widths = [m[0] for m in mins] if mins else None
-    kind = spec.kind if spec.kind != FREE else GRID
+    kind = spec.kind_for(count)
+    if kind == BSP:
+        names = list(ids[:count]) if ids and len(ids) >= count else [str(i) for i in range(count)]
+        area = (left, top, right, bottom)
+        tree = bsp.sync(bsp.from_dict(spec.bsp), names, area, gap=gap)
+        boxes = bsp.rects(tree, area, gap, dict(zip(names, mins)) if mins else None)
+        return [boxes[name] for name in names]
     if kind == SIDE_BY_SIDE:
         weights = spec.weights[:count] + [1.0] * (count - len(spec.weights[:count]))
         return [(a, top, b, bottom) for a, b in _split(left, right, weights, gap, widths)]
@@ -179,7 +238,8 @@ def tile(spec: LayoutSpec, work: Rect, count: int, scale: float = 1.0,
         columns = [widths[0], max(widths[1:])] if widths else None
         (main_l, main_r), (side_l, side_r) = _split(left, right, [spec.ratio, 1.0 - spec.ratio], gap, columns)
         heights = [m[1] for m in mins[1:]] if mins else None
-        side = [(side_l, a, side_r, b) for a, b in _split(top, bottom, [1.0] * (count - 1), gap, heights)]
+        rows = spec.heights[:count - 1] + [1.0] * (count - 1 - len(spec.heights[:count - 1]))
+        side = [(side_l, a, side_r, b) for a, b in _split(top, bottom, rows, gap, heights)]
         return [(main_l, top, main_r, bottom)] + side
     columns = spec.columns or math.ceil(math.sqrt(count))
     columns = max(1, min(columns, count))
@@ -201,18 +261,48 @@ def fits(rects: list[Rect], minimums: list[Size], area: Rect | None = None) -> b
                             for r in rects))
 
 
-def overflowing(spec: LayoutSpec, work: Rect, minimums: list[Size], scale: float = 1.0) -> list[int]:
+def overflowing(spec: LayoutSpec, work: Rect, minimums: list[Size], scale: float = 1.0,
+                ids: list[str] | None = None) -> list[int]:
     """Indices of the windows that cannot be tiled with the others because of their minimum sizes: they float.
     First every window that does not fit even alone, then the newest (last) window with a minimum, until the rest
-    fit. Windows without a minimum never cause an overflow (they can always shrink)."""
+    fit. Windows without a minimum never cause an overflow (they can always shrink). An automatic layout is
+    resolved once, for all the windows, so a floating window cannot flip the layout back and forth."""
+    spec = fixed_kind(spec, len(minimums))
     alone = tile(spec, work, 1, scale)[0]
     out = [i for i, m in enumerate(minimums) if not fits([alone], [m])]
     while True:
         rest = [i for i in range(len(minimums)) if i not in out]
         mins = [minimums[i] for i in rest]
-        if not rest or fits(tile(spec, work, len(rest), scale, mins), mins, alone):
+        names = [ids[i] for i in rest] if ids else None
+        if not rest or fits(tile(spec, work, len(rest), scale, mins, names), mins, alone):
             return sorted(out)
         out.append(next(i for i in reversed(rest) if minimums[i] != (0, 0)))
+
+
+def fixed_kind(spec: LayoutSpec, count: int) -> LayoutSpec:
+    """``spec`` with an automatic layout resolved for ``count`` windows (other layouts are returned as they are)."""
+    if spec.kind != AUTO:
+        return spec
+    fixed = LayoutSpec.from_dict(spec.to_dict())
+    fixed.kind = spec.kind_for(count)
+    return fixed
+
+
+def grow(weights: list[float], count: int, index: int, delta: float) -> list[float] | None:
+    """Relative sizes after tile ``index`` (of ``count``) grew by ``delta`` (a fraction of the whole; negative:
+    shrank); the others give or take the space in proportion. None when it cannot change (any further)."""
+    if count < 2 or not 0 <= index < count:
+        return None
+    values = weights[:count] + [1.0] * (count - len(weights[:count]))
+    total = sum(values)
+    shares = [v / total for v in values]
+    new = min(0.8, max(0.1, shares[index] + delta))
+    if abs(new - shares[index]) < 1e-6:
+        return None
+    rest = 1.0 - shares[index]
+    result = [new if i == index else (s / rest * (1.0 - new) if rest > 0 else (1.0 - new) / (count - 1))
+              for i, s in enumerate(shares)]
+    return [round(v, 4) for v in result]
 
 
 def keep_visible(work: Rect, rect: Rect) -> Rect:

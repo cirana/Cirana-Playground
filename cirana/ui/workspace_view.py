@@ -19,7 +19,8 @@ from cirana.ui.theme import ON_ACCENT, TEXT, TEXT2
 from cirana.widgets.dnd import app_id_from, entry_from, entry_mime
 from cirana.widgets.layout_preview import LayoutPreview
 from cirana.widgets.workspace_card import STATE_TEXT, WorkspaceCard, entry_icon_app, repolish
-from cirana.wm.layout import FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
+from cirana.ui.wm_dialogs import AutoLayoutPicker
+from cirana.wm.layout import AUTO, BSP, FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
 from cirana.wm.monitors import resolve
 
 # (label, kind, grid columns): "Grid 2×2" and "Dynamic grid" are the same layout with fixed / automatic columns.
@@ -29,6 +30,8 @@ LAYOUT_CHOICES = [
     ("Grid 2×2", GRID, 2),
     ("Dynamic grid", GRID, 0),
     ("Saved positions", FREE, 0),
+    ("BSP (split per window)", BSP, 0),
+    ("Automatic (by window count)", AUTO, 0),
 ]
 STATE_KIND = {EntryState.RUNNING: "good", EntryState.LAUNCHING: "busy", EntryState.AMBIGUOUS: "warn",
               EntryState.UNAVAILABLE: "bad"}
@@ -108,6 +111,9 @@ class EntryRow(QFrame):
             sub.setToolTip(detail)
             sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # a long title never widens it
             text.addWidget(sub)
+        tiling = ctx.tiler.describe(status.window) if status.window is not None else ""
+        if tiling:
+            text.addWidget(label(tiling[0].upper() + tiling[1:], "Muted"))
         if status.message:
             note = label(status.message, "RowWarning", wrap=True)
             text.addWidget(note)
@@ -275,7 +281,9 @@ class WorkspaceView(QWidget):
         self.ratio_spin.setSuffix(" % main")
         self.ratio_spin.setToolTip("Width of the main (first) window")
         self.ratio_spin.valueChanged.connect(self._layout_edited)
-        for widget in (self.kind_combo, self.monitor_combo):
+        self.auto_picker = AutoLayoutPicker()
+        self.auto_picker.changed.connect(self._layout_edited)
+        for widget in (self.kind_combo, self.auto_picker, self.monitor_combo):
             controls.addWidget(widget)
         spins = QHBoxLayout()
         spins.addWidget(self.gap_spin)
@@ -387,6 +395,7 @@ class WorkspaceView(QWidget):
             index = next((i for i, (_t, kind, columns) in enumerate(LAYOUT_CHOICES)
                           if kind == spec.kind and (kind != GRID or columns == (2 if spec.columns == 2 else 0))), 3)
             self.kind_combo.setCurrentIndex(index)
+            self.auto_picker.set_auto(spec.auto)
             self.monitor_combo.clear()
             self.monitor_combo.addItem("Primary monitor", None)
             for monitor in monitors:
@@ -403,7 +412,8 @@ class WorkspaceView(QWidget):
         finally:
             self._syncing = False
         free = spec.kind == FREE
-        self.ratio_spin.setVisible(spec.kind == MAIN_SIDE)
+        self.ratio_spin.setVisible(spec.kind in (MAIN_SIDE, AUTO))
+        self.auto_picker.setVisible(spec.kind == AUTO)
         self.monitor_combo.setEnabled(not free)
         self.gap_spin.setEnabled(not free)
         self.dynamic_check.setEnabled(not free)
@@ -417,7 +427,11 @@ class WorkspaceView(QWidget):
         elif tiler.paused(workspace.id):
             state, kind = "Tiling paused while you move a window", "warn"
         elif tiler.manages(workspace.id):
-            state, kind = "Tiling: on, following this workspace's windows", "good"
+            stacks = tiler.stack_count()
+            state = ("Tiling: on, following this workspace's windows"
+                     + (f" · {stacks} stack{'s' if stacks != 1 else ''}" if stacks else "")
+                     + (" · monocle" if tiler.monocle_on() else ""))
+            kind = "good"
         else:
             state, kind = "Tiling: on, starts when this workspace is activated", "idle"
         self.tiling_state.setText(state)
@@ -428,7 +442,7 @@ class WorkspaceView(QWidget):
             hint = "Windows go back where they were when you chose “Save current positions” (⋯ menu)."
         elif spec.dynamic:
             hint = ("Minimized and maximized windows are left out until restored. Drag a window onto another one "
-                    "to swap them.")
+                    "to swap them; keyboard shortcuts focus, swap, resize, stack and switch monocle.")
         else:
             hint = "Applied only when you activate or press Apply layout; move windows freely afterwards."
         self.layout_hint.setText(hint)
@@ -438,8 +452,16 @@ class WorkspaceView(QWidget):
         else:  # what activating would lay out
             shown = [s for s in statuses if s.placeable]
         monitor = resolve(spec.monitor, monitors)
-        self.preview.set_layout(spec, [(s.entry.id, self.ctx.workspaces.display_name(s.entry)) for s in shown],
-                                monitor.work if monitor else None)
+        entries = [(s.entry.id, self.ctx.workspaces.display_name(s.entry)) for s in shown]
+        preview_spec = spec
+        if tiler.manages(workspace.id):  # stacks share a tile: one tile per stack, named after its windows
+            group = next((g for g in tiler.shown_groups() if g.id == workspace.id), None)
+            if group is not None:
+                preview_spec = group.spec
+                names = dict(entries)
+                entries = [(u.id, " + ".join(names.get(s, w.display_title) for s, w in u.members))
+                           for u in group.units]
+        self.preview.set_layout(preview_spec, entries, monitor.work if monitor else None)
 
     def _layout_edited(self, _value: object = None) -> None:
         if self._syncing:
@@ -451,7 +473,8 @@ class WorkspaceView(QWidget):
         old = workspace.layout
         spec = LayoutSpec(kind=kind, gap=self.gap_spin.value(), ratio=self.ratio_spin.value() / 100,
                           columns=columns, weights=list(old.weights), monitor=self.monitor_combo.currentData(),
-                          free=dict(old.free), dynamic=old.dynamic)
+                          free=dict(old.free), dynamic=old.dynamic, heights=list(old.heights), bsp=dict(old.bsp),
+                          auto=self.auto_picker.auto(), stacks=[dict(s) for s in old.stacks])
         if spec.to_dict() != old.to_dict():
             self.ctx.workspaces.set_layout(workspace.id, spec)
 

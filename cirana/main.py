@@ -11,8 +11,11 @@ from PySide6.QtWidgets import QApplication
 
 from cirana.core.application_registry import ApplicationRegistry
 from cirana.core.dynamic_tiling import DynamicTiler
+from cirana.core.focus_follows_mouse import FocusFollowsMouse
+from cirana.core.hotkeys import HotkeyManager
 from cirana.core.process_tracker import ProcessTracker
 from cirana.core.scan_controller import ScanController
+from cirana.core.window_commands import WindowCommands
 from cirana.core.workspace_controller import WorkspaceController
 from cirana.core.workspace_launcher import WorkspaceLauncher
 from cirana.core.workspaces import WorkspaceManager
@@ -53,6 +56,11 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
     wm = WorkspaceController(workspaces, registry, windows, window_control, WorkspaceLauncher(registry, windows))
     tiler = DynamicTiler(wm, settings)
     overlays = TilingOverlays(tiler, settings)
+    commands = WindowCommands(tiler)
+    hotkeys = HotkeyManager(settings)  # registers nothing until main() starts it (the tests never do)
+    hotkeys.triggered.connect(commands.run)
+    hotkeys.failed.connect(wm.message.emit)  # RegisterHotKey refused a shortcut: the user is told (toast)
+    ffm = FocusFollowsMouse(settings, notify=wm.message.emit)
     ctx = AppContext(
         settings=settings,
         registry=registry,
@@ -66,12 +74,17 @@ def build_app(argv: list[str] | None = None, window_hooks: bool = True,
         wm=wm,
         tiler=tiler,
         overlays=overlays,
+        commands=commands,
+        hotkeys=hotkeys,
+        ffm=ffm,
     )
     window = MainWindow(ctx)
     tracker.set_apps(registry.all_apps())
     registry.changed.connect(lambda: tracker.set_apps(registry.all_apps()))
     app.aboutToQuit.connect(tiler.stop)  # first: nothing is arranged any more while CIRANA shuts down
     app.aboutToQuit.connect(overlays.stop)
+    app.aboutToQuit.connect(hotkeys.stop)
+    app.aboutToQuit.connect(ffm.stop)
     app.aboutToQuit.connect(windows.stop)
     app.aboutToQuit.connect(tracker.shutdown)
     app.aboutToQuit.connect(scanner.shutdown)
@@ -110,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     tracker, settings, registry = ctx.tracker, ctx.settings, ctx.registry
     tracker.start()
     ctx.windows.start()
+    ctx.hotkeys.start()  # global shortcuts (RegisterHotKey on CIRANA's own thread)
+    ctx.ffm.start()  # repairs a crashed session's setting, applies the option (off by default)
     # First run (empty cache) always scans; afterwards the cached list is shown instantly.
     if settings.get("scan_on_startup") or not registry.scanned_at:
         ctx.scanner.start()

@@ -20,7 +20,7 @@ py -3.12 -m venv .venv                       # any Python 3.11+; `py -0p` lists 
 
 ```powershell
 python -m unittest discover -s tests -t .
-$env:CIRANA_LIVE = "1"; python -m unittest tests.test_wm_live    # optional: real windows on the desktop
+$env:CIRANA_LIVE = "1"; python -m unittest tests.test_wm_live tests.test_stacks_live tests.test_hotkeys_live
 ```
 
 The regular suite never touches a real window: the window manager runs against a simulated desktop
@@ -29,8 +29,10 @@ windows, recycled handles, terminals hosting consoles). It covers the inventory 
 rules, the application-window filter, layouts, monitor fallback, placement verification, refusals, workspace
 activation, concurrent and cancelled launches, ambiguous windows, rediscovery after a restart, the version 1 →
 2 data migration, the legacy clean-up, the pages and drag and drop. `tests/test_forbidden_apis.py` fails if
-`SetParent`, `SetWindowLong*`, `AttachThreadInput`, `SendInput`, code injection, taskbar-button hiding or process
-termination (outside the legacy clean-up) ever appear in the code.
+`SetParent`, `SetWindowLong*`, `AttachThreadInput`, `SendInput`, code injection, taskbar-button hiding, `SW_HIDE`,
+synchronous `ShowWindow`, foreground-lock tricks (`AllowSetForegroundWindow`, `LockSetForegroundWindow`,
+`BlockInput`), profile-writing `SystemParametersInfo` flags or process termination (outside the legacy clean-up) ever
+appear in the code, and that `RegisterHotKey` / `SystemParametersInfoW` are used only by their own modules.
 
 The **live** tests (opt-in) start a real Win32 window in another process (`tests/hang_window_helper.py`) and check on
 the real desktop that the tracker sees it, that it is moved and sized exactly with its styles, owner and parent
@@ -51,13 +53,19 @@ cirana/wm/                         the window manager (no Qt widgets)
   backend.py     every Win32 call, behind one object (tests substitute tests/fake_desktop.py)
   tracker.py     WindowTracker: WinEvent hook thread + probe thread + WindowInventory (GUI-thread signals)
   monitors.py    monitors, work areas, DPI; finding a saved monitor again
-  layout.py      LayoutSpec and pure layout geometry (side by side, main + side, grid, saved positions)
-  controller.py  WindowController: place / restore / minimize / maximize / raise, verified, per-window results
+  layout.py      LayoutSpec and pure layout geometry (side by side, main + side, grid, BSP, automatic, saved positions)
+  bsp.py         the BSP tree: insert next to the focused tile, remove, swap, resize, store (pure)
+  navigation.py  which tile / monitor lies left, right, above, below (pure geometry)
+  rules.py       window rules: float / ignore / belongs to a workspace (pure matching)
+  controller.py  WindowController: place / restore / minimize / maximize / raise / focus, verified, per window
 cirana/core/
   workspaces.py           workspace model v2, storage, v1 migration (WorkspaceManager)
   workspace_controller.py runtime: entry ↔ window bindings, activation, layouts, saved positions
   workspace_launcher.py   starts missing applications and attributes their new windows
-  dynamic_tiling.py       DynamicTiler: re-tiles the active workspace as its windows come and go
+  dynamic_tiling.py       DynamicTiler: re-tiles as windows come and go; tiles, stacks, monocle, keyboard commands
+  window_commands.py      the commands by name (what a shortcut or a button does)
+  hotkeys.py              global shortcuts (RegisterHotKey on CIRANA's own thread), conflict checks
+  focus_follows_mouse.py  optional focus follows the mouse (Windows' own active window tracking, per session)
   legacy_recovery.py      one-time clean-up after the old embedding versions
 cirana/ui/                pages: Home, Applications, Workspaces, Windows, Favorites, Settings
 cirana/widgets/           workspace_card, layout_preview, app cards, drag and drop payloads
@@ -117,7 +125,7 @@ cirana/widgets/           workspace_card, layout_preview, app cards, drag and dr
   dialog during activation, or *Choose window* on the row). After a CIRANA restart the bindings are rebuilt the
   same way from the windows that are still open.
 * **Activate** = make it the active workspace, reuse every open window (nothing is restarted), start the missing
-  applications, arrange the group in its layout, raise it (first entry on top, with the focus). Other workspaces'
+  applications, arrange the group in its layout, raise it (the window that had the focus last in it gets it again, else the first entry). Other workspaces'
   windows are not hidden, minimized or closed. *Close workspace* only stops managing: every application keeps running.
 * **Launching.** Several applications start at once. A new window is attributed to the launch whose process tree
   shows it (launchers and stubs such as Discord's `Update.exe` start the real program as a child; shortcuts are
@@ -194,6 +202,92 @@ side, main + side panel, grids) follows its windows by itself:
   quitting drops it and its late result. With tiling off, *Apply layout* and activation behave exactly as before;
   with it on, *Apply layout* re-tiles over the windows that are actually there. When CIRANA closes, windows stay put.
 
+### Keyboard control and monocle
+
+Global shortcuts (Settings → *Keyboard and focus* → *Edit shortcuts…*) act on the window that has the keyboard focus.
+The focused window is read back from Windows (`GetForegroundWindow`), falling back to the tracker's
+`foreground_key` when the foreground is CIRANA's own window (a button was clicked).
+
+| Default | Command |
+|---|---|
+| Ctrl+Alt+←/→/↑/↓ | focus the neighbouring window (tiles of every monitor; without tiling: any visible window) |
+| Ctrl+Alt+Shift+←/→/↑/↓ | swap with the neighbouring tile; at a monitor's edge: move to the next monitor |
+| Ctrl+Alt+Win+→ / ← | make the tile wider / narrower |
+| Ctrl+Alt+Win+↓ / ↑ | make the tile taller / lower |
+| Ctrl+Alt+Enter | monocle on / off |
+| Ctrl+Alt+Space | float the window / tile it again |
+| Ctrl+Alt+PageDown / PageUp | next / previous window of the stack |
+| Ctrl+Alt+Backspace | take the window out of its stack |
+| Ctrl+Alt+Shift+PageDown / PageUp | move the window to the next / previous workspace |
+| (none) | stack with the tile left / right / above / below; activate the next / previous workspace |
+
+* **Registration.** `RegisterHotKey(NULL, …, MOD_NOREPEAT)` on a thread of CIRANA's own with its message loop; no
+  keyboard hook. `WM_HOTKEY` reaches the GUI thread through a queued signal. A shortcut another program holds (error
+  1409) is reported for that shortcut (Settings and the log); the others keep working. Shortcuts are registered only
+  while CIRANA runs (`main()`), never by the tests' `build_app`.
+* **Conflicts.** The editor refuses shortcuts Windows (Win+…, Alt+Tab, Alt+F4, Ctrl+Esc, Game Bar …), almost every
+  application (Ctrl+C/V/S/Z …, Ctrl+Tab, Alt+←/→, Alt+letter menus) or CIRANA's own window (Ctrl+K, Ctrl+B, Ctrl+1–6)
+  already use, and duplicates. It warns about Ctrl+Alt+letter / digit / punctuation: on keyboards with AltGr
+  (Turkish Q, German …) that is AltGr and types characters such as @ € [ ]. The defaults avoid all of these; the
+  editor uses modifier boxes and a key list, so keys the shell swallows can still be chosen.
+* **Focus.** One `SetForegroundWindow` per command. Windows lets the process that received the last input (the
+  hotkey) hand the focus on; when it refuses, that is reported once and nothing is retried or forced (no input
+  injection, no attached input queues). Focus changes never start a re-tile.
+* **Resize.** BSP: the split nearest to the tile in that direction moves by 5 % (10–90 %). Side by side: column
+  weights. Main + side panel: the main width (from any tile) and the side windows' heights. Grid tiles cannot be
+  resized alone (the message says so). Workspace layouts store the result with the workspace; all-window tiling per
+  monitor (`global_adjust`). Keyboard commands are re-tiled at once and are not rate limited.
+* **Monocle** shows the focused tile over the whole work area (minus the gap) and raises it; the others keep their
+  tiles behind it. Nothing in the layout changes, so switching it off puts every window back exactly where it was.
+  It ends when its window closes, minimizes or maximizes, when it is dragged, and when a new window joins the layout.
+  Its border is twice as thick.
+
+### Smart tiling: BSP, automatic layouts, window rules
+
+* **BSP** (`wm/bsp.py`): a new window splits the tile that had the focus last (else the last one) along its longer
+  side; a closed window's sibling takes its space and nothing else moves. Windows that already are where they belong
+  are not touched again during a re-tile. Workspace trees are stored with the workspace's layout, by entry id
+  (`layout.bsp`), so they survive restarts; all-window tiling keeps one tree per monitor in memory (its leaves are
+  runtime window keys). Swaps (keyboard or drag) exchange leaves, drops onto another monitor rename leaves across
+  trees. Minimum sizes move the splits (`bsp.rects(…, minimums)`), and the overflow / floating rules are the same as
+  for the other layouts. Every caller of `tile()` (re-tile, drop preview, *Apply layout*, the layout preview) passes
+  the tile ids, so all of them use the same tree.
+* **Automatic** picks a layout from the number of tiles (default: 2 side by side, 3 main + side panel, 4 or more a
+  grid; each step can be side by side, main + side, grid or BSP). It is resolved once per round, before minimum sizes
+  are considered, so a window that floats because of its minimum cannot flip the layout back and forth.
+* **Window rules** (Settings → *Window rules*; `config.json` `window_rules`): executable (file name or full path),
+  window class, AppUserModelID and an optional title filter; every field that is set must match (case-insensitive);
+  a rule without executable, class or AUMID is refused, so a title can never catch unrelated windows. Actions:
+  *float* (never tiled by either scope), *ignore* (not tiled, stacked, focused by the keyboard, bordered, and no
+  workspace entry binds it automatically) and *belongs to a workspace* (while that workspace is active its dynamic
+  tiling arranges every matching window, after its own entries, and activation raises them; no entries are added,
+  nothing is started, a window already bound to one of its entries is not counted twice). First enabled match wins;
+  the list can be reordered. The editor fills the fields from an open window and shows how many open windows match.
+
+### Window stacks, moving windows, focus follows the mouse
+
+* **Stacks**: several windows share one tile; one is shown. The windows stay independent top-level windows
+  (no `SetParent`, no style change, taskbar buttons and Alt+Tab unchanged). By default the others lie under the
+  shown one at the same place (nothing is hidden, so nothing can be lost even after a crash). With *Stacked windows
+  … are minimized* (`stack_hide = "minimize"`) they are minimized with `SW_SHOWMINNOACTIVE` (never `SW_HIDE`): the
+  taskbar button stays. Those windows are written to `stack_hidden.json` and shown again (`SW_SHOWNOACTIVATE`, only if
+  the handle still belongs to the same process) when they leave the stack or it ends, when the scope is no longer
+  managed (workspace switch, tiling off), when CIRANA closes, and after a crash at the next start. Restoring a hidden
+  window from the taskbar, or Alt+Tab to it, makes it the shown one; closing the shown one shows the next; a stack with
+  one window left ends. The shown window's border carries one tab per window (the shown one green).
+* Workspace stacks are stored with the workspace by entry id (`layout.stacks`), with the shown window, so a workspace
+  switch keeps them; the window that had the focus last in a workspace gets it back on activation, and the entry
+  order is unchanged.
+* **Moving**: swap at a monitor's edge moves the window to the next monitor (all-window tiling: into that monitor's
+  layout; a workspace layout fills one monitor, so there the window is moved at the same relative place and floats).
+  Windows that are not tiled are moved the same way. *Move to the next / previous workspace* removes the window's
+  entry from the active workspace and adds it, bound, to the other one; the window stays open where it is.
+* **Focus follows the mouse** (off by default): Windows does not let a background program take the focus because the
+  mouse moved, and CIRANA does not get around that. It switches on Windows' own *active window tracking*
+  (`SPI_SETACTIVEWINDOWTRACKING`, with a delay and optionally raising) for this session only (`fWinIni = 0`: nothing
+  written to the profile), keeps the user's own values in `config.json` while it has changed them, and puts them back
+  when it is switched off, when CIRANA closes, and after a crash at the next start. It applies to every window.
+
 ### Interface (phase 4)
 
 * **Home:** workspace cards with the applications' icons, a dot per open window, "n of m open" and *Activate*.
@@ -207,6 +301,14 @@ side, main + side panel, grids) follows its windows by itself:
   applications…* (catalog) and *Add open windows…* (a picker that follows windows as they open and close).
 * **Windows:** every open application window, live, with bring to front, minimize, maximize / restore, and "add to
   a workspace"; it shows which workspaces a window belongs to and, with several monitors, which monitor it is on.
+  The tiling panel offers BSP and automatic (with its per-count choices) and shows "n windows tiled · k stacks ·
+  monocle"; each row says *tiled*, *monocle*, *stack 2/3 (shown / hidden)* or why it floats, and its ☰ menu has
+  monocle, *Stack with…*, *Show in its stack*, *Take out of the stack*, *Float this window* and *Window rule for
+  this program…*.
+* **Workspaces:** the layout picker offers BSP and automatic too; the state line shows stacks and monocle, rows show
+  how tiling treats their window, and the preview draws a stack as one tile.
+* **Settings:** *Keyboard and focus* (shortcuts on / off, which work, the editor, how stacked windows are hidden,
+  focus follows the mouse with delay and raise) and *Window rules* (new, edit, reorder, delete).
 * The top bar's workspace pill activates a workspace, raises or closes the active one.
 
 ### Data (phase 5)
@@ -249,7 +351,16 @@ and nothing to recover after a crash.
 * Dynamic tiling reacts to the mouse move loop only: a window moved with the keyboard (Win+Arrow snapping) or by the
   application itself stays where it went until the next change of the workspace's windows re-tiles it. Dragging
   onto another tile swaps the two; resizing does not change the layout's proportions (the window snaps back).
-* Real mouse drags of tiled windows were tested with simulated move-loop events, not with a physical drag.
+* Real mouse drags of tiled windows were tested with simulated move-loop events, not with a physical drag. The
+  global shortcuts were tested by registering them on the real system (taken / released, error 1409) and by
+  delivering the hotkey message; pressing them physically was not automated (synthetic input is refused).
+* Grid tiles cannot be resized one by one (BSP can); resizing with the mouse still snaps back to the layout.
+* A workspace's layout fills one monitor: moving one of its windows to another monitor makes it float there.
+  Swapping with a window a rule assigns to a workspace exchanges BSP tiles, but that order is not stored (such
+  windows have no entry).
+* Focus follows the mouse uses Windows' system-wide setting, so it applies to all windows while it is on.
+* A window that is restored from the taskbar within a few milliseconds of a workspace switch can briefly be counted
+  as minimized until the tracker reports it (the next event re-tiles it).
 * Discovery names come from shortcut names; categorization is heuristic.
 
 ## Build an EXE

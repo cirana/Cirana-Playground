@@ -287,8 +287,10 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Managed windows are ordinary windows: nothing has to be handed back, they simply stay where they are.
-        self.ctx.tiler.stop()
+        self.ctx.tiler.stop()  # also shows windows hidden in a stack again
         self.ctx.overlays.stop()
+        self.ctx.hotkeys.stop()
+        self.ctx.ffm.stop()  # the user's own focus setting comes back
         self.ctx.settings.set("window_geometry", bytes(self.saveGeometry().toBase64()).decode("ascii"))
         self.ctx.windows.stop()
         self.ctx.tracker.shutdown()

@@ -23,6 +23,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "global_layout": {},
     "tiling_exclusions": [],
     "tiling_borders": True,  # focus borders around tiled windows
+    "global_adjust": {},  # all-window tiling: per monitor, proportions changed with the keyboard
+    "window_rules": [],  # cirana.wm.rules: float / ignore / workspace rules
+    "stack_hide": "behind",  # a stack's hidden windows: "behind" the shown one, or "minimize"d
+    "hotkeys": {},  # action -> shortcut (cirana.core.hotkeys; missing: the default)
+    "hotkeys_enabled": True,
+    "focus_follows_mouse": False,  # cirana.core.focus_follows_mouse
+    "ffm_delay": 150,
+    "ffm_raise": False,
+    "ffm_restore": {},  # the user's own values while CIRANA has changed them (repaired after a crash)
 }
 
 

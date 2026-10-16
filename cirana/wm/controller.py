@@ -193,8 +193,18 @@ class WindowController:
             return self._refused(window, w.last_error())
         return Result(window.key, window.display_title, Status.PLACED)
 
-    def minimize(self, window: TrackedWindow) -> Result:
-        return self._show(window, w.SW_MINIMIZE)
+    def minimize(self, window: TrackedWindow, quiet: bool = False) -> Result:
+        """``quiet``: without activating another window (a stack's hidden window)."""
+        return self._show(window, w.SW_SHOWMINNOACTIVE if quiet else w.SW_MINIMIZE)
+
+    def show(self, window: TrackedWindow) -> Result:
+        """Show a minimized window again where it was, without taking the focus."""
+        refused = self.check(window)
+        if refused is not None:
+            return refused
+        if self.backend.is_minimized(window.hwnd):
+            self.backend.show_async(window.hwnd, w.SW_SHOWNOACTIVATE)
+        return Result(window.key, window.display_title, Status.PLACED)
 
     def maximize(self, window: TrackedWindow) -> Result:
         return self._show(window, w.SW_SHOWMAXIMIZED)
@@ -220,3 +230,19 @@ class WindowController:
         if usable and not self.backend.set_foreground(usable[0].hwnd):
             log.info("Windows did not let CIRANA hand the foreground to %s", usable[0].display_title)
         return results
+
+    def focus(self, window: TrackedWindow) -> Result:
+        """Raise the window and give it the keyboard focus, once. Windows only lets the process that received the
+        last input (a CIRANA hotkey or click) hand the foreground on; when it refuses, that is reported and nothing
+        is retried or forced."""
+        refused = self.check(window)
+        if refused is not None:
+            return refused
+        name = window.display_title
+        if self.backend.is_minimized(window.hwnd):
+            self.backend.show_async(window.hwnd, w.SW_RESTORE)
+        self.backend.raise_window(window.hwnd)
+        if not self.backend.set_foreground(window.hwnd):
+            return Result(window.key, name, Status.FAILED, f"Windows did not let CIRANA give {name} the focus (it "
+                                                           "only allows that right after a CIRANA shortcut or click).")
+        return Result(window.key, name, Status.PLACED)

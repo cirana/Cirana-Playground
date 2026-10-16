@@ -42,7 +42,7 @@ class LayoutPreview(QWidget):
             work = self._work
             return [from_fraction(self._spec.free[i].fraction, work) if i in self._spec.free else None
                     for i in self._ids]
-        return list(tile(self._spec, self._work, len(self._ids)))
+        return list(tile(self._spec, self._work, len(self._ids), ids=self._ids))  # BSP: its stored tree
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)

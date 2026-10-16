@@ -19,12 +19,15 @@ from cirana.ui.context import AppContext
 from cirana.ui.dialogs import window_icon_app, window_subtitle
 from cirana.ui.icons import icon
 from cirana.ui.theme import TEXT2
+from cirana.ui.wm_dialogs import AutoLayoutPicker, RuleDialog
 from cirana.wm.identity import TrackedWindow
-from cirana.wm.layout import GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
+from cirana.wm.layout import AUTO, BSP, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
 from cirana.wm.monitors import monitor_for_rect
+from cirana.wm.rules import FLOAT, WindowRule
 
 TILING_CHOICES = [("Side by side", SIDE_BY_SIDE, 0), ("Main + side panel", MAIN_SIDE, 0), ("Grid 2×2", GRID, 2),
-                  ("Dynamic grid", GRID, 0)]
+                  ("Dynamic grid", GRID, 0), ("BSP (split per window)", BSP, 0),
+                  ("Automatic (by window count)", AUTO, 0)]
 
 
 def _tool(glyph: str, tip: str) -> QToolButton:
@@ -63,7 +66,11 @@ class WindowRow(QFrame):
         tiler = ctx.tiler
         if tiler.global_on:
             reason = tiler.float_reason(window)
-            meta += f" · {reason}" if reason else " · tiled"
+            meta += f" · {reason}" if reason else f" · {tiler.describe(window) or 'tiled'}"
+        elif tiler.describe(window):
+            meta += f" · {tiler.describe(window)}"
+        elif tiler.ignores(window):
+            meta += " · ignored (window rule)"
         sub = label(meta, "AppCategory")
         sub.setToolTip(window.app_exe)
         sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -88,6 +95,9 @@ class WindowRow(QFrame):
         add = _tool("plus", "Add to a workspace")
         add.clicked.connect(lambda: view.show_add_menu(window, add.mapToGlobal(add.rect().bottomLeft())))
         row.addWidget(add)
+        more = _tool("list", "Tiling: monocle, stacks, float, window rule")
+        more.clicked.connect(lambda: view.show_tiling_menu(window, more.mapToGlobal(more.rect().bottomLeft())))
+        row.addWidget(more)
 
 
 class WindowsView(QWidget):
@@ -135,9 +145,12 @@ class WindowsView(QWidget):
     def _tiling_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("Panel")
-        row = QHBoxLayout(panel)
-        row.setContentsMargins(16, 10, 16, 10)
+        rows = QVBoxLayout(panel)
+        rows.setContentsMargins(16, 10, 16, 10)
+        rows.setSpacing(8)
+        row = QHBoxLayout()
         row.setSpacing(12)
+        rows.addLayout(row)
         self.tile_all = QCheckBox("Tile all windows")
         self.tile_all.setToolTip(
             "Arrange every application window automatically, one layout per monitor, as windows open, close, "
@@ -157,6 +170,8 @@ class WindowsView(QWidget):
         self.tiling_ratio.setRange(20, 80)
         self.tiling_ratio.setSuffix(" % main")
         self.tiling_ratio.valueChanged.connect(self._tiling_edited)
+        self.tiling_auto = AutoLayoutPicker()  # second line: only shown for the automatic layout
+        self.tiling_auto.changed.connect(self._tiling_edited)
         for widget in (self.tiling_kind, self.tiling_gap, self.tiling_ratio):
             row.addWidget(widget)
         self.tiling_borders = QCheckBox("Borders")
@@ -165,9 +180,17 @@ class WindowsView(QWidget):
         self.tiling_borders.toggled.connect(
             lambda on: None if self._syncing else self.ctx.overlays.set_borders_enabled(on))
         row.addWidget(self.tiling_borders)
+        row.addStretch(1)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        rows.addLayout(row)
+        row.addWidget(self.tiling_auto)
         self.tiling_state = label("", "TilingState")
         self.tiling_state.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         row.addWidget(self.tiling_state, 1)
+        keys = _tool("settings", "Keyboard shortcuts, focus follows the mouse, stacks and window rules (Settings)")
+        keys.clicked.connect(lambda: self.ctx.actions.navigate.emit("settings", None))
+        row.addWidget(keys)
         return panel
 
     def _sync_tiling(self) -> None:
@@ -179,12 +202,14 @@ class WindowsView(QWidget):
             index = next((i for i, (_t, kind, columns) in enumerate(TILING_CHOICES)
                           if kind == spec.kind and (kind != GRID or columns == (2 if spec.columns == 2 else 0))), 1)
             self.tiling_kind.setCurrentIndex(index)
+            self.tiling_auto.set_auto(spec.auto)
             self.tiling_gap.setValue(spec.gap)
             self.tiling_ratio.setValue(round(spec.ratio * 100))
             self.tiling_borders.setChecked(self.ctx.overlays.borders_enabled)
         finally:
             self._syncing = False
-        self.tiling_ratio.setVisible(spec.kind == MAIN_SIDE)
+        self.tiling_ratio.setVisible(spec.kind in (MAIN_SIDE, AUTO))
+        self.tiling_auto.setVisible(spec.kind == AUTO)
         if not tiler.global_on:
             state, kind = "Off: windows stay where you put them", "idle"
         elif tiler.paused():
@@ -192,8 +217,11 @@ class WindowsView(QWidget):
         else:
             tiled = tiler.tiled_windows()
             monitors = len({tiler._home.get(w.key) for w in tiled})
+            stacks = tiler.stack_count()
             state = (f"On: {len(tiled)} window{'s' if len(tiled) != 1 else ''} tiled"
-                     + (f" on {monitors} monitors" if monitors > 1 else ""))
+                     + (f" on {monitors} monitors" if monitors > 1 else "")
+                     + (f" · {stacks} stack{'s' if stacks != 1 else ''}" if stacks else "")
+                     + (" · monocle" if tiler.monocle_on() else ""))
             kind = "good"
         self.tiling_state.setText(state)
         self.tiling_state.setProperty("kind", kind)
@@ -213,8 +241,10 @@ class WindowsView(QWidget):
             return
         _text, kind, columns = TILING_CHOICES[max(0, self.tiling_kind.currentIndex())]
         self.ctx.tiler.set_global_layout(LayoutSpec(kind, gap=self.tiling_gap.value(),
-                                                    ratio=self.tiling_ratio.value() / 100, columns=columns))
-        self.tiling_ratio.setVisible(kind == MAIN_SIDE)
+                                                    ratio=self.tiling_ratio.value() / 100, columns=columns,
+                                                    auto=self.tiling_auto.auto()))
+        self.tiling_ratio.setVisible(kind in (MAIN_SIDE, AUTO))
+        self.tiling_auto.setVisible(kind == AUTO)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -256,6 +286,37 @@ class WindowsView(QWidget):
         controller = self.ctx.window_control
         run_async(lambda _cancel: action(controller),
                   lambda results: [self.ctx.actions.message.emit(r.message) for r in results if not r.ok])
+
+    def show_tiling_menu(self, window: TrackedWindow, pos) -> None:  # noqa: ANN001
+        """What dynamic tiling can do with this window: monocle, stacks, floating, a window rule."""
+        tiler = self.ctx.tiler
+        menu = QMenu(self)
+        found = tiler.tile_of(window.key)
+        if found is not None:
+            group, unit = found
+            menu.addAction("Monocle off" if group.monocle == unit.id else "Monocle (fill the screen)",
+                           lambda: tiler.toggle_monocle(window))
+            others = [u.window for u in group.units if u.id != unit.id]
+            if others:
+                stack_menu = menu.addMenu("Stack with")
+                for other in others:
+                    stack_menu.addAction(other.display_title, lambda o=other: tiler.stack_with(window, o))
+            if unit.stacked:
+                if unit.window.key != window.key:
+                    menu.addAction("Show in its stack", lambda: tiler.show_stacked(window))
+                menu.addAction("Take out of the stack", lambda: tiler.unstack(window))
+            menu.addSeparator()
+        floating = window.key in tiler._user_float
+        menu.addAction("Tile this window again" if floating else "Float this window (until it closes)",
+                       lambda: tiler.toggle_float(window))
+        menu.addAction("Window rule for this program…", lambda: self._new_rule(window))
+        menu.exec(pos)
+        self.refresh()
+
+    def _new_rule(self, window: TrackedWindow) -> None:
+        dialog = RuleDialog(self.ctx, WindowRule.for_window(window, FLOAT), self)
+        if dialog.exec():
+            self.ctx.tiler.set_rules(self.ctx.tiler.rules() + [dialog.current()])
 
     def show_add_menu(self, window: TrackedWindow, pos) -> None:  # noqa: ANN001
         menu = QMenu(self)

@@ -5,8 +5,11 @@ from dataclasses import dataclass
 
 from cirana.core.application_registry import ApplicationRegistry
 from cirana.core.dynamic_tiling import DynamicTiler
+from cirana.core.focus_follows_mouse import FocusFollowsMouse
+from cirana.core.hotkeys import HotkeyManager
 from cirana.core.process_tracker import ProcessTracker
 from cirana.core.scan_controller import ScanController
+from cirana.core.window_commands import WindowCommands
 from cirana.core.workspace_controller import WorkspaceController
 from cirana.core.workspaces import WorkspaceManager
 from cirana.storage.settings_manager import SettingsManager
@@ -31,6 +34,9 @@ class AppContext:
     wm: WorkspaceController  # workspaces at runtime: bindings, activation, layouts
     tiler: DynamicTiler  # re-tiles the active workspace as its windows come and go (when switched on)
     overlays: TilingOverlays  # focus borders and the drop preview (cirana.ui.tiling_overlay)
+    commands: WindowCommands  # focus / swap / resize / monocle / stack commands by name
+    hotkeys: HotkeyManager  # global shortcuts for the commands (registered once main() starts them)
+    ffm: FocusFollowsMouse  # optional focus follows the mouse
 
     @property
     def view_mode(self) -> str:

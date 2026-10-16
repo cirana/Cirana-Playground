@@ -189,3 +189,7 @@ class Win32Backend:
     def set_foreground(self, hwnd: int) -> bool:
         """Windows only lets the foreground process hand the foreground on; CIRANA is it right after a click."""
         return bool(w.SetForegroundWindow(hwnd))
+
+    def foreground_window(self) -> int:
+        """The window with the keyboard focus right now (read only)."""
+        return int(w.GetForegroundWindow() or 0)

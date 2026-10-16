@@ -117,6 +117,7 @@ SetWindowPos = _bind(user32, "SetWindowPos", wintypes.BOOL, HWND, HWND, ctypes.c
 ShowWindowAsync = _bind(user32, "ShowWindowAsync", wintypes.BOOL, HWND, ctypes.c_int)  # posted: never blocks
 GetWindowPlacement = _bind(user32, "GetWindowPlacement", wintypes.BOOL, HWND, ctypes.POINTER(WINDOWPLACEMENT))
 SetForegroundWindow = _bind(user32, "SetForegroundWindow", wintypes.BOOL, HWND)
+GetForegroundWindow = _bind(user32, "GetForegroundWindow", HWND)
 PostMessageW = _bind(user32, "PostMessageW", wintypes.BOOL, HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 IsHungAppWindow = _bind(user32, "IsHungAppWindow", wintypes.BOOL, HWND)
 
@@ -412,3 +413,26 @@ def process_identity(pid: int) -> tuple[float, str, str]:
 
 def last_error() -> int:
     return ctypes.get_last_error()
+
+
+# -- global hotkeys (cirana.core.hotkeys) ---------------------------------------------------------------------------
+# RegisterHotKey(NULL, ...) posts WM_HOTKEY to the registering thread's queue: no hook, nothing in other processes.
+MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 0x0001, 0x0002, 0x0004, 0x0008, 0x4000
+WM_HOTKEY = 0x0312
+WM_APP = 0x8000
+ERROR_HOTKEY_ALREADY_REGISTERED = 1409
+RegisterHotKey = _bind(user32, "RegisterHotKey", wintypes.BOOL, HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT)
+UnregisterHotKey = _bind(user32, "UnregisterHotKey", wintypes.BOOL, HWND, ctypes.c_int)
+PeekMessageW = _bind(user32, "PeekMessageW", wintypes.BOOL, ctypes.POINTER(wintypes.MSG), HWND, wintypes.UINT,
+                     wintypes.UINT, wintypes.UINT)
+
+# -- focus follows the mouse (cirana.core.focus_follows_mouse): Windows' own "activate a window by hovering over it"
+# (active window tracking), changed for this session only (never written to the user profile).
+SPI_GETACTIVEWINDOWTRACKING = 0x1000
+SPI_SETACTIVEWINDOWTRACKING = 0x1001
+SPI_GETACTIVEWNDTRKZORDER = 0x100C
+SPI_SETACTIVEWNDTRKZORDER = 0x100D
+SPI_GETACTIVEWNDTRKTIMEOUT = 0x2002
+SPI_SETACTIVEWNDTRKTIMEOUT = 0x2003
+SystemParametersInfoW = _bind(user32, "SystemParametersInfoW", wintypes.BOOL, wintypes.UINT, wintypes.UINT,
+                              ctypes.c_void_p, wintypes.UINT)

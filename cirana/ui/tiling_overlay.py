@@ -12,7 +12,9 @@ Both are CIRANA's own small top-level windows, drawn next to (never inside) the 
   DPI monitors line up); the applications' windows, styles and parents are never touched.
 
 A border sits directly above its window in the z-order (inserted after the window above it), so a window placed
-over a tiled one also covers its border. Colours follow WindowTracker.foreground_key / foreground_changed.
+over a tiled one also covers its border. Colours follow WindowTracker.foreground_key / foreground_changed. The shown
+window of a stack carries one small tab per stacked window along its top edge (the shown one green), and a window in
+monocle gets a border twice as thick, so both modes are visible at a glance.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ log = logging.getLogger(__name__)
 
 ACTIVE_COLOR = COLORS["accent"]  # #C3E85B
 INACTIVE_COLOR = COLORS["border"]  # #2A2D34, the theme's neutral grey
+STACK_COLOR = COLORS["text2"]  # the other windows of a stack (a lighter grey than the border)
 BORDER_PX = 2  # logical pixels; scaled with the monitor's DPI
 PREVIEW_FILL = QColor(143, 148, 157, 72)  # text2 grey, translucent
 PREVIEW_LINE = QColor(143, 148, 157, 170)
@@ -98,11 +101,18 @@ class BorderOverlay(_Overlay):
         super().__init__()
         self.active = False
         self.thickness = BORDER_PX
+        self.stack: tuple[int, int] | None = None  # (index of the shown window, windows in the stack)
+        self.monocle = False
 
     def set_active(self, active: bool) -> None:
         if active != self.active:
             self.active = active
             self.update()  # repaint only when the colour really changes
+
+    def set_mode(self, stack: tuple[int, int] | None, monocle: bool) -> None:
+        if (stack, monocle) != (self.stack, self.monocle):
+            self.stack, self.monocle = stack, monocle
+            self.update()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -114,6 +124,13 @@ class BorderOverlay(_Overlay):
         inner = QPainterPath()
         inner.addRect(outer.adjusted(width, width, -width, -width))
         painter.fillPath(path.subtracted(inner), QColor(ACTIVE_COLOR if self.active else INACTIVE_COLOR))
+        if self.stack is not None:  # one tab per stacked window, centred on the top edge
+            shown, count = self.stack
+            tab, space = width * 10, width * 2
+            left = (outer.width() - (count * tab + (count - 1) * space)) / 2
+            for index in range(count):
+                box = QRectF(left + index * (tab + space), 0, tab, width * 2)
+                painter.fillRect(box, QColor(ACTIVE_COLOR if index == shown else STACK_COLOR))
         painter.end()
 
 
@@ -208,12 +225,20 @@ class TilingOverlays(QObject):
             if border is None:
                 border = self.borders[key] = BorderOverlay()
             border.set_active(key == focused)
+            found = self.tiler.tile_of(key)
+            stack = monocle = None
+            if found is not None:
+                group, unit = found
+                if unit.stacked:
+                    stack = ([s for s, _w in unit.members].index(unit.active), len(unit.members))
+                monocle = group.monocle == unit.id
+            border.set_mode(stack, bool(monocle))
             self._place(border, window, monitors)
 
     def _place(self, border: BorderOverlay, window: TrackedWindow, monitors: list[Monitor]) -> None:
         monitor = monitor_for_rect(window.rect, monitors)
         scale = monitor.scale if monitor is not None else 1.0
-        border.thickness = max(1, round(BORDER_PX * scale))
+        border.thickness = max(1, round(BORDER_PX * scale)) * (2 if border.monocle else 1)
         t = border.thickness
         left, top, right, bottom = window.rect
         try:

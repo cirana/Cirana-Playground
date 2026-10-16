@@ -76,7 +76,7 @@ def plan_layout(spec: LayoutSpec, slots: list[tuple[str, TrackedWindow | None]],
         return placements
     monitor = resolve(spec.monitor, monitors)
     sizes = [minimums.get(window.key, (0, 0)) if window is not None else (0, 0) for _e, window in slots]         if minimums else None
-    rects = tile(spec, monitor.work, len(slots), monitor.scale, sizes)
+    rects = tile(spec, monitor.work, len(slots), monitor.scale, sizes, [entry_id for entry_id, _w in slots])
     for (entry_id, window), rect in zip(slots, rects):
         if window is not None and (only is None or entry_id in only):
             placements.append((entry_id, Placement(window, rect)))
@@ -117,11 +117,13 @@ class WorkspaceController(QObject):
         self._busy: dict[str, int] = {}
         self.tiler = None  # cirana.core.dynamic_tiling.DynamicTiler, when it is attached
         self._shown: dict[str, tuple] = {}  # window key -> (title, minimized, maximized) last reported
+        self._last_focus: dict[str, str] = {}  # workspace id -> key of its window that had the focus last
         self._notify = QTimer(self, singleShot=True, interval=60)  # coalesces bursts of window events
         self._notify.timeout.connect(lambda: self.statuses_changed.emit(""))
         tracker.window_added.connect(lambda _w: self._notify.start())
         tracker.window_removed.connect(self._on_removed)
         tracker.window_changed.connect(self._on_changed)
+        tracker.foreground_changed.connect(self._on_foreground)
         launcher.outcome.connect(self._on_launch_outcome)
         launcher.finished.connect(self._on_launches_finished)
         workspaces.changed.connect(self._prune)
@@ -160,7 +162,8 @@ class WorkspaceController(QObject):
                 result[entry.id] = EntryStatus(entry, EntryState.LAUNCHING, message=message)
                 continue
             rule = self.workspaces.rule_for(entry)
-            candidates = [win for win in windows if win.key not in used and rule.matches(win)]
+            candidates = [win for win in windows if win.key not in used and rule.matches(win)
+                          and not (self.tiler is not None and self.tiler.ignores(win))]  # a window rule: hands off
             hinted = [win for win in candidates if entry.hint_title and win.title == entry.hint_title]
             pick = candidates[0] if len(candidates) == 1 else hinted[0] if len(hinted) == 1 else None
             if pick is not None:
@@ -240,6 +243,42 @@ class WorkspaceController(QObject):
         self._shown[window.key] = shown
         if any(window.key in bindings.values() for bindings in self._bindings.values()):
             self._notify.start()
+
+    def _on_foreground(self, key: str) -> None:
+        workspace_id = self.workspaces.active_id
+        if key and workspace_id and key in self._bindings.get(workspace_id, {}).values():
+            self._last_focus[workspace_id] = key
+
+    def group(self, workspace_id: str) -> list[TrackedWindow]:
+        """The workspace's open windows to raise together: the one that had the focus last first (it gets the
+        focus again), then the others in order; windows a window rule assigns to the workspace are included."""
+        windows = [s.window for s in self.statuses(workspace_id) if s.window is not None]
+        if self.tiler is not None:
+            windows += [w for w in self.tiler.rule_windows(workspace_id) if w not in windows]
+            windows = [w for w in windows if not self.tiler.out_of_sight(w.key)]  # a stack shows one window
+        last = self._last_focus.get(workspace_id)
+        windows.sort(key=lambda w: w.key != last)  # stable: the rest keep their order
+        return windows
+
+    def move_window(self, window: TrackedWindow, target_id: str) -> bool:
+        """Move a window from the active workspace to another one: its entry there is removed (a window that was not
+        in it is just added) and it becomes an entry of ``target_id``, bound to it. The window itself stays open
+        where it is; it is arranged when that workspace is activated."""
+        source = self.workspaces.active()
+        target = self.workspaces.get(target_id)
+        if target is None or (source is not None and source.id == target_id):
+            return False
+        if source is not None:
+            for status in self.statuses(source.id):
+                if status.window is not None and status.window.key == window.key:
+                    self.workspaces.remove_entry(source.id, status.entry.id)
+        entry = next((s.entry for s in self.statuses(target_id) if s.window is not None
+                      and s.window.key == window.key), None)
+        if entry is None:
+            entry = self.workspaces.add_window(target_id, window)
+        self.choose(target_id, entry.id, window.key, place=False)
+        self.message.emit(f"Moved {window.display_title} to {target.name}")
+        return True
 
     def _prune(self) -> None:
         for workspace_id in list(self._bindings):
@@ -351,17 +390,18 @@ class WorkspaceController(QObject):
         are actually there, so no place is kept for one that is still starting)."""
         if self.tiler is not None and self.tiler.global_on:
             # All-window tiling is in charge of every window: re-tile, and raise this workspace's windows if asked.
-            group = [s.window for s in self.statuses(workspace_id) if s.window is not None] if raise_group else False
+            group = self.group(workspace_id) if raise_group else False
             return self.tiler.reflow(raise_group=group or False)
         if self.tiler is not None and self.tiler.manages(workspace_id):
-            return self.tiler.reflow(workspace_id, raise_group)
+            return self.tiler.reflow(workspace_id, (self.group(workspace_id) or False) if raise_group else False)
         workspace = self.workspaces.get(workspace_id)
         if workspace is None:
             return False
-        slots = self._slots(workspace)
+        slots = [(entry_id, window if window is None or self.tiler is None or not self.tiler.ignores(window)
+                  else None) for entry_id, window in self._slots(workspace)]
         spec = workspace.layout
         backend, controller = self.tracker.backend, self.windows
-        group = [window for _entry, window in slots if window is not None]
+        group = self.group(workspace_id)
 
         def job(cancel):  # noqa: ANN001
             planned = plan_layout(spec, slots, backend.monitors(), only)
@@ -401,7 +441,7 @@ class WorkspaceController(QObject):
         self.busy_changed.emit(workspace_id, self.busy(workspace_id))
 
     def bring_to_front(self, workspace_id: str) -> None:
-        group = [s.window for s in self.statuses(workspace_id) if s.window is not None]
+        group = self.group(workspace_id)
         if not group:
             self.message.emit("None of this workspace's windows is open.")
             return
