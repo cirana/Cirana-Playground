@@ -12,16 +12,23 @@ previous one is not posted. It runs on the worker thread of the re-tile (never t
 the controller's asynchronous ``SetWindowPos``, so a hung application cannot block it. Cancelling (a newer layout,
 a drag, quitting) stops it between two frames; the next animation starts from wherever the windows are.
 
-Pure apart from the callbacks it is given (no Win32, no Qt), so it is tested with a fake clock.
+The interpolation (``run_animation``) is pure apart from the callbacks it is given (no Win32, no Qt), so it is
+tested with a fake clock; ``glide_placements`` / ``snap_to_targets`` are the thin layer that connects it to the
+controller. It knows nothing about layouts: it moves windows between two rectangles.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from cirana.wm.controller import TOLERANCE
 from cirana.wm.identity import Rect, TrackedWindow
+from cirana.wm.monitors import monitor_for_rect
+
+log = logging.getLogger(__name__)
 
 FPS = 30
 DEFAULT_MS = 180
@@ -111,3 +118,44 @@ def run_animation(moves: list[Move], post: Callable[[Move, Rect], bool], cancel:
             stats["cancelled"] = 1
             break
     return stats
+
+
+def glide_placements(backend, controller, placements, cancel: threading.Event, milliseconds: int,  # noqa: ANN001
+                     animated: dict[int, tuple[TrackedWindow, Rect]]) -> None:
+    """Glide the windows of ``placements`` (``Placement`` of window + target frame) towards their targets - the worker
+    thread part of a re-tile, before ``WindowController.place_all`` sets the exact positions. Windows that cannot be
+    animated safely are left out (minimized, maximized, off screen, full screen, on a monitor with another scale where
+    the application resizes itself, already there); the ones that move are noted in ``animated`` (window, outer
+    target) until the placement has confirmed them. An animation problem never costs the placement."""
+    try:
+        monitors = backend.monitors()
+        moves = []
+        for placement in placements:
+            window, hwnd = placement.window, placement.window.hwnd
+            if backend.is_minimized(hwnd) or backend.is_maximized(hwnd):
+                continue
+            start = backend.frame_rect(hwnd)
+            here, there = monitor_for_rect(start, monitors), monitor_for_rect(placement.rect, monitors)
+            if here is None or there is None or here.dpi != there.dpi or start == here.rect \
+                    or max(abs(a - b) for a, b in zip(start, placement.rect)) <= TOLERANCE:
+                continue
+            moves.append(Move(window, backend.window_rect(hwnd), controller.outer_frame(window, placement.rect)))
+        if moves:
+            for move in moves:
+                animated[move.window.hwnd] = (move.window, move.end)
+            run_animation(moves, lambda m, rect: controller.nudge(m.window, rect), cancel, milliseconds / 1000.0,
+                          lambda m: backend.still_same(m.window) and not backend.is_hung(m.window.hwnd))
+    except Exception:  # noqa: BLE001
+        log.debug("Window animation failed", exc_info=True)
+
+
+def snap_to_targets(controller, animated: dict[int, tuple[TrackedWindow, Rect]]) -> None:  # noqa: ANN001
+    """Windows an animation left half way get their exact places at once (tiling stops, CIRANA quits). Only windows
+    that are still the same ones and may be touched."""
+    for window, outer in list(animated.values()):
+        try:
+            if controller.check(window) is None:
+                controller.nudge(window, outer)
+        except Exception:  # noqa: BLE001 - one window's problem never keeps the others half way
+            log.debug("Could not finish a window animation", exc_info=True)
+    animated.clear()

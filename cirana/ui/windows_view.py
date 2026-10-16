@@ -19,15 +19,14 @@ from cirana.ui.context import AppContext
 from cirana.ui.dialogs import window_icon_app, window_subtitle
 from cirana.ui.icons import icon
 from cirana.ui.theme import TEXT2
+from cirana.ui.layout_choices import TILING_CHOICES, choice_index
 from cirana.ui.wm_dialogs import AutoLayoutPicker, RuleDialog
 from cirana.wm.identity import TrackedWindow
-from cirana.wm.layout import ADAPTIVE, AUTO, BSP, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
+from cirana.wm.layout import ADAPTIVE, AUTO, MAIN_SIDE, LayoutSpec
 from cirana.wm.monitors import monitor_for_rect
 from cirana.wm.rules import FLOAT, WindowRule
 
-TILING_CHOICES = [("Side by side", SIDE_BY_SIDE, 0), ("Main + side panel", MAIN_SIDE, 0), ("Grid 2×2", GRID, 2),
-                  ("Dynamic grid", GRID, 0), ("BSP (split per window)", BSP, 0),
-                  ("By window count (fixed steps)", AUTO, 0), ("Automatic (adaptive)", ADAPTIVE, 0)]
+
 
 
 def _tool(glyph: str, tip: str) -> QToolButton:
@@ -196,9 +195,7 @@ class WindowsView(QWidget):
         self._syncing = True
         try:
             self.tile_all.setChecked(tiler.global_on)
-            index = next((i for i, (_t, kind, columns) in enumerate(TILING_CHOICES)
-                          if kind == spec.kind and (kind != GRID or columns == (2 if spec.columns == 2 else 0))), len(TILING_CHOICES) - 1)
-            self.tiling_kind.setCurrentIndex(index)
+            self.tiling_kind.setCurrentIndex(choice_index(TILING_CHOICES, spec, len(TILING_CHOICES) - 1))
             self.tiling_auto.set_auto(spec.auto)
             self.tiling_gap.setValue(spec.gap)
             self.tiling_ratio.setValue(round(spec.ratio * 100))
@@ -213,12 +210,10 @@ class WindowsView(QWidget):
             state, kind = "Paused while you move a window", "warn"
         else:
             tiled = tiler.tiled_windows()
-            monitors = len({tiler._home.get(w.key) for w in tiled})
-            stacks = tiler.stack_count()
+            monitors = tiler.monitor_count()
             state = (f"On: {len(tiled)} window{'s' if len(tiled) != 1 else ''} tiled"
                      + (f" on {monitors} monitors" if monitors > 1 else "")
-                     + (f" · {stacks} stack{'s' if stacks != 1 else ''}" if stacks else "")
-                     + (" · monocle" if tiler.monocle_on() else "")
+                     + tiler.mode_notes()
                      + (f" · automatic: {', '.join(dict.fromkeys(tiler.adaptive_layouts()))}"
                         if tiler.adaptive_layouts() else "")
                      + (" · layout adjusted to minimum sizes" if any(g.fallback for g in tiler.shown_groups())

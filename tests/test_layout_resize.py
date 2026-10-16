@@ -7,8 +7,8 @@ minimum sizes and says why an edge cannot move. ``fit_layout`` finds another lay
 import unittest
 
 from cirana.wm import bsp
-from cirana.wm.layout import (AUTO, BSP, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, Resize, fit_layout, moved_edges,
-                              overflowing, resize_tile, tile)
+from cirana.wm.layout import AUTO, BSP, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, fit_layout, overflowing, tile
+from cirana.wm.resize import Resize, moved_edges, resize_tile
 
 WORK = (0, 0, 2000, 1000)
 

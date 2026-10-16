@@ -19,21 +19,11 @@ from cirana.ui.theme import ON_ACCENT, TEXT, TEXT2
 from cirana.widgets.dnd import app_id_from, entry_from, entry_mime
 from cirana.widgets.layout_preview import LayoutPreview
 from cirana.widgets.workspace_card import STATE_TEXT, WorkspaceCard, entry_icon_app, repolish
+from cirana.ui.layout_choices import LAYOUT_CHOICES, choice_index
 from cirana.ui.wm_dialogs import AutoLayoutPicker
-from cirana.wm.layout import ADAPTIVE, AUTO, BSP, FREE, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec
+from cirana.wm.layout import ADAPTIVE, AUTO, FREE, MAIN_SIDE, LayoutSpec
 from cirana.wm.monitors import resolve
 
-# (label, kind, grid columns): "Grid 2×2" and "Dynamic grid" are the same layout with fixed / automatic columns.
-LAYOUT_CHOICES = [
-    ("Side by side", SIDE_BY_SIDE, 0),
-    ("Main + side panel", MAIN_SIDE, 0),
-    ("Grid 2×2", GRID, 2),
-    ("Dynamic grid", GRID, 0),
-    ("Saved positions", FREE, 0),
-    ("BSP (split per window)", BSP, 0),
-    ("By window count (fixed steps)", AUTO, 0),
-    ("Automatic (adaptive)", ADAPTIVE, 0),
-]
 STATE_KIND = {EntryState.RUNNING: "good", EntryState.LAUNCHING: "busy", EntryState.AMBIGUOUS: "warn",
               EntryState.UNAVAILABLE: "bad"}
 
@@ -394,9 +384,7 @@ class WorkspaceView(QWidget):
         monitors = self.ctx.windows.backend.monitors()
         self._syncing = True
         try:
-            index = next((i for i, (_t, kind, columns) in enumerate(LAYOUT_CHOICES)
-                          if kind == spec.kind and (kind != GRID or columns == (2 if spec.columns == 2 else 0))), 3)
-            self.kind_combo.setCurrentIndex(index)
+            self.kind_combo.setCurrentIndex(choice_index(LAYOUT_CHOICES, spec, 3))
             self.auto_picker.set_auto(spec.auto)
             self.monitor_combo.clear()
             self.monitor_combo.addItem("Primary monitor", None)
@@ -429,10 +417,7 @@ class WorkspaceView(QWidget):
         elif tiler.paused(workspace.id):
             state, kind = "Tiling paused while you move a window", "warn"
         elif tiler.manages(workspace.id):
-            stacks = tiler.stack_count()
-            state = ("Tiling: on, following this workspace's windows"
-                     + (f" · {stacks} stack{'s' if stacks != 1 else ''}" if stacks else "")
-                     + (" · monocle" if tiler.monocle_on() else ""))
+            state = "Tiling: on, following this workspace's windows" + tiler.mode_notes()
             kind = "good"
         else:
             state, kind = "Tiling: on, starts when this workspace is activated", "idle"

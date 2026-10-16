@@ -388,11 +388,9 @@ class WorkspaceController(QObject):
 
         With dynamic tiling in charge of the workspace the whole layout is re-tiled instead (over the windows that
         are actually there, so no place is kept for one that is still starting)."""
-        if self.tiler is not None and self.tiler.global_on:
-            # All-window tiling is in charge of every window: re-tile, and raise this workspace's windows if asked.
-            group = self.group(workspace_id) if raise_group else False
-            return self.tiler.reflow(raise_group=group or False)
-        if self.tiler is not None and self.tiler.manages(workspace_id):
+        if self.tiler is not None and (self.tiler.global_on or self.tiler.manages(workspace_id)):
+            # Dynamic tiling is in charge (all-window tiling of every window, or this workspace's own): it re-tiles,
+            # and raises this workspace's windows if asked.
             return self.tiler.reflow(workspace_id, (self.group(workspace_id) or False) if raise_group else False)
         workspace = self.workspaces.get(workspace_id)
         if workspace is None:

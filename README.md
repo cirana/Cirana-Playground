@@ -55,6 +55,9 @@ cirana/wm/                         the window manager (no Qt widgets)
   monitors.py    monitors, work areas, DPI; finding a saved monitor again
   layout.py      LayoutSpec and pure layout geometry (side by side, main + side, grid, BSP, automatic, saved positions)
   bsp.py         the BSP tree: insert next to the focused tile, remove, swap, resize, store (pure)
+  adaptive.py    the adaptive layout engine: scores BSP / main + side / grid / column / side by side (pure)
+  resize.py      mouse resize geometry: which divider an edge belongs to, the layout afterwards (pure)
+  animation.py   window glide: easing, time-based frames, cancel; glide_placements connects it to the controller
   navigation.py  which tile / monitor lies left, right, above, below (pure geometry)
   rules.py       window rules: float / ignore / belongs to a workspace (pure matching)
   controller.py  WindowController: place / restore / minimize / maximize / raise / focus, verified, per window
@@ -62,7 +65,12 @@ cirana/core/
   workspaces.py           workspace model v2, storage, v1 migration (WorkspaceManager)
   workspace_controller.py runtime: entry ↔ window bindings, activation, layouts, saved positions
   workspace_launcher.py   starts missing applications and attributes their new windows
-  dynamic_tiling.py       DynamicTiler: re-tiles as windows come and go; tiles, stacks, monocle, keyboard commands
+  dynamic_tiling.py       DynamicTiler: the coordinator (settings, rules, events, signals); its parts share its state:
+  tiling_model.py         constants, Unit (a tile), Group (tiles laid out together)
+  tiling_plan.py          what is laid out and where: groups, adaptive engine, minimum sizes, window status
+  tiling_interactions.py  mouse drag / resize, previews, swap, keyboard commands
+  tiling_stacks.py        stacks, monocle, windows hidden for them
+  tiling_reflow.py        when a re-tile runs, the worker function that places the windows, its result
   window_commands.py      the commands by name (what a shortcut or a button does)
   hotkeys.py              global shortcuts (RegisterHotKey on CIRANA's own thread), conflict checks
   focus_follows_mouse.py  optional focus follows the mouse (Windows' own active window tracking, per session)
