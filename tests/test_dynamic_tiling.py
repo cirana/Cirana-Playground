@@ -196,15 +196,27 @@ class DragTests(TilingEnv):
         self.assertEqual([a.app_id for a in self.manager.get(w_.id).apps],
                          [stable_app_id("Notes"), stable_app_id("Code")])  # the order is kept
 
-    def test_resizing_in_place_snaps_back_to_the_layout(self):
+    def test_a_resize_the_layout_cannot_take_snaps_back_to_the_layout(self):
         self.tiled_workspace("Code", "Notes")
         code, notes = self.open("Code"), self.open("Notes")
         self.settle()
         self.drag(notes, True)
-        notes.rect = (notes.rect[0] + 40, notes.rect[1], notes.rect[2], notes.rect[3])
+        notes.rect = (notes.rect[0], notes.rect[1] + 40, notes.rect[2], notes.rect[3])  # side by side: no heights
         self.drag(notes, False)
         self.settle()
         self.assertEqual([code.rect, notes.rect], self.slots(2))
+        self.assertTrue(any("full height" in m for m in self.messages))  # and the user is told why
+
+    def test_a_moved_window_is_not_a_resize(self):
+        self.tiled_workspace("Code", "Notes")
+        code, notes = self.open("Code"), self.open("Notes")
+        self.settle()
+        self.drag(notes, True)
+        notes.rect = (notes.rect[0] + 40, notes.rect[1] + 40, notes.rect[2] + 40, notes.rect[3] + 40)
+        self.drag(notes, False)
+        self.settle()
+        self.assertEqual([code.rect, notes.rect], self.slots(2))  # back in its tile; the proportions are untouched
+        self.assertEqual(self.manager.get(self.manager.active_id).layout.weights, [])
 
     def test_drags_of_other_windows_are_ignored(self):
         self.tiled_workspace("Code")

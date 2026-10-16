@@ -438,3 +438,143 @@ class LiveMinimumSizeTests(unittest.TestCase):
         self.assertEqual(huge["frame"][0], work[0])  # its left edge (and title bar) on the screen
         self.assertTrue(work[1] <= huge["frame"][1] and huge["frame"][3] <= work[3])
         self.assertEqual(len(out["messages"]), 1)
+
+
+@unittest.skipUnless(LIVE, "live desktop test: set CIRANA_LIVE=1")
+class LiveThirdWindowAndResizeTests(unittest.TestCase):
+    """On the real desktop with real windows of CIRANA's own helper (it answers WM_GETMINMAXINFO): three windows that
+    each need 40 % of the width all get a tile, and a window resized "by the mouse" (the move / size events are fed to
+    the tracker and the window is resized with SetWindowPos from the test, since synthetic input is refused) keeps
+    its size, the neighbour follows, nothing overlaps. Every program except the helper is set to float first."""
+
+    @classmethod
+    def setUpClass(cls):
+        LiveWindowManagerTests.setUpClass()
+        cls.app = QApplication.instance()
+
+    def wait(self, condition, timeout=10.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            self.app.processEvents()
+            if condition():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def start(self, count, min_size=None):
+        from pathlib import Path
+
+        from cirana.core.application_registry import ApplicationRegistry
+        from cirana.core.dynamic_tiling import DynamicTiler
+        from cirana.core.workspace_controller import WorkspaceController
+        from cirana.core.workspace_launcher import WorkspaceLauncher
+        from cirana.core.workspaces import WorkspaceManager
+        from cirana.native import win32_api as w
+        from cirana.storage.settings_manager import SettingsManager
+        from cirana.wm.controller import WindowController
+        from cirana.wm.tracker import WindowTracker
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        home = tempfile.mkdtemp(prefix="cirana-live-resize-")
+        settings = SettingsManager(Path(home))
+        registry = ApplicationRegistry(settings)
+        tracker = WindowTracker(hooks=True, interval=60)
+        tracker.start()
+        self.addCleanup(tracker.stop)
+        self.assertTrue(self.wait(lambda: tracker.ready))
+        helper_name = os.path.basename(sys.executable).lower()
+        others = {win.exe_name.lower() for win in tracker.windows()} - {helper_name, ""}
+        settings.set("tiling_exclusions", sorted(others))  # never arrange the user's own windows
+        monitor = tracker.backend.monitors()[0]
+        command = [sys.executable, "-m", "tests.hang_window_helper", os.path.join(home, "x"), "1"]
+        if min_size:
+            command.append("{}x{}".format(int(min_size[0] / monitor.scale), int(min_size[1] / monitor.scale)))
+        helpers = []
+        for _ in range(count):
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, text=True, cwd=root)
+            helpers.append((proc, int(proc.stdout.readline().split()[1])))
+        for proc, hwnd in helpers:
+            self.addCleanup(proc.stdout.close)
+            self.addCleanup(proc.wait, 10)
+            self.addCleanup(w.PostMessageW, hwnd, w.WM_CLOSE, 0, 0)  # politely, our own helpers only
+        self.assertTrue(self.wait(lambda: all(tracker.inventory.by_hwnd(h) for _p, h in helpers)))
+        if any(tracker.inventory.by_hwnd(h).exe_name.lower() != helper_name for _p, h in helpers):
+            self.skipTest("the helper runs under another interpreter image than expected")
+        manager = WorkspaceManager(settings, registry, monitors=tracker.backend.monitors)
+        wm = WorkspaceController(manager, registry, tracker, WindowController(tracker.backend),
+                                 WorkspaceLauncher(registry, tracker))
+        tiler = DynamicTiler(wm, settings)
+        self.addCleanup(tiler.stop)
+        return tracker, tiler, [h for _p, h in helpers], monitor
+
+    @staticmethod
+    def apart(frames):
+        return all(a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+                   for i, a in enumerate(frames) for b in frames[i + 1:])
+
+    def test_three_windows_with_minimum_sizes_get_three_tiles(self):
+        from cirana.wm.layout import SIDE_BY_SIDE, LayoutSpec
+
+        monitor = None
+        probe = __import__("cirana.wm.backend", fromlist=["Win32Backend"]).Win32Backend().monitors()[0]
+        wide = int((probe.work[2] - probe.work[0]) * 0.4)
+        tracker, tiler, hwnds, monitor = self.start(3, (wide, 200))
+        tiler.set_global_layout(LayoutSpec(SIDE_BY_SIDE, gap=10))
+        tiler.set_global(True)
+        work = monitor.work
+
+        def tiled():
+            frames = [tracker.backend.frame_rect(h) for h in hwnds]
+            return (all(work[0] <= f[0] and f[2] <= work[2] and work[1] <= f[1] and f[3] <= work[3] for f in frames)
+                    and self.apart(frames))
+
+        self.assertTrue(self.wait(tiled, 15.0), [tracker.backend.frame_rect(h) for h in hwnds])
+        self.wait(lambda: False, 1.5)
+        frames = [tracker.backend.frame_rect(h) for h in hwnds]
+        self.assertTrue(self.apart(frames), frames)
+        for hwnd in hwnds:
+            state, why = tiler.status(tracker.inventory.by_hwnd(hwnd))
+            self.assertEqual(state, "tiled", why)
+            frame = tracker.backend.frame_rect(hwnd)
+            self.assertGreaterEqual(frame[2] - frame[0], wide - 24)  # (its minimum counts the invisible borders)
+        self.assertEqual(tiler.stack_count(), 0)
+        self.assertTrue(tiler.shown_groups()[0].fallback, "side by side cannot hold them: another layout was used")
+
+    def test_a_mouse_resize_is_kept(self):
+        from cirana.native import win32_api as w
+        from cirana.wm.layout import SIDE_BY_SIDE, LayoutSpec
+
+        tracker, tiler, hwnds, monitor = self.start(2)
+        tiler.set_global_layout(LayoutSpec(SIDE_BY_SIDE, gap=10))
+        tiler.set_global(True)
+        first, second = hwnds
+
+        def frame(h):
+            return tracker.backend.frame_rect(h)
+
+        def halves():
+            a, b = frame(first), frame(second)
+            return abs((a[2] - a[0]) - (b[2] - b[0])) <= 2 and self.apart([a, b]) and a[2] - a[0] > 100
+
+        self.assertTrue(self.wait(halves, 15.0))
+        self.wait(lambda: False, 1.0)
+        first, second = sorted(hwnds, key=lambda h: frame(h)[0])  # the left tile: its right edge is a divider
+        before = frame(first)
+        wanted_right = before[2] - 150
+        tracker._on_event(w.EVENT_SYSTEM_MOVESIZESTART, first)  # the user grabs the right edge
+        self.wait(lambda: tiler.paused())
+        outer, visible = tracker.backend.window_rect(first), frame(first)
+        w.SetWindowPos(first, None, outer[0], outer[1], outer[2] - outer[0] - 150, outer[3] - outer[1],
+                       w.SWP_NOZORDER | w.SWP_NOACTIVATE)
+        self.wait(lambda: abs(frame(first)[2] - wanted_right) <= 2)
+        self.assertEqual(frame(first)[0], visible[0])
+        tracker._on_event(w.EVENT_SYSTEM_MOVESIZEEND, first)  # released
+        self.wait(lambda: False, 2.5)  # long enough for the re-tile and its verification
+        a, b = frame(first), frame(second)
+        self.assertLessEqual(abs(a[2] - wanted_right), 2, (a, wanted_right))  # it did not go back
+        self.assertLessEqual(abs(b[0] - (a[2] + round(10 * monitor.scale))), 2, (a, b))  # the neighbour followed
+        self.assertTrue(self.apart([a, b]))
+        self.assertGreater(b[2] - b[0], a[2] - a[0])
+        count = tiler.count
+        self.wait(lambda: False, 1.0)
+        self.assertEqual(tiler.count, count)  # no loop afterwards

@@ -73,8 +73,9 @@ from cirana.storage.json_store import JsonStore
 from cirana.wm import bsp
 from cirana.wm.controller import TOLERANCE, Placement, Result, Status
 from cirana.wm.identity import Rect, TrackedWindow
-from cirana.wm.layout import (BSP, GRID, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, Size, clamp_into, fixed_kind,
-                              from_fraction, grow, keep_visible, overflowing, tile, to_fraction)
+from cirana.wm.layout import (BSP, GRID, KIND_NAMES, MAIN_SIDE, SIDE_BY_SIDE, LayoutSpec, Resize, Size, clamp_into,
+                              fit_layout, fixed_kind, from_fraction, grow, keep_visible, moved_edges, resize_tile,
+                              tile, to_fraction)
 from cirana.wm.monitors import Monitor, MonitorRef, monitor_for_rect, resolve
 from cirana.wm.navigation import adjacent_monitor, neighbor
 from cirana.wm.rules import FLOAT, IGNORE, WORKSPACE, WindowRule, first_match, read_rules
@@ -90,6 +91,7 @@ GLOBAL = "*"  # scope id of all-window tiling (workspace scopes use the workspac
 RULE_SLOT = "win:"  # slot id prefix of a window a window rule assigns to a workspace (it has no entry)
 RESIZE_STEP = 0.05  # one resize command: 5 % of the split / of the whole width or height
 BEHIND, MINIMIZE = "behind", "minimize"  # how a stack's hidden windows are kept out of sight
+TILED, STACKED, FLOATING, IGNORED = "tiled", "stacked", "floating", "ignored"  # what is done with a window
 
 
 def _center_in(rect: Rect, point: tuple[int, int]) -> bool:
@@ -136,6 +138,14 @@ class Group:
     minimums: dict[str, Size] = field(default_factory=dict)  # unit id -> known minimum on this group's monitor
     monocle: str = ""  # unit shown over the whole work area ("" = none)
     scope: str = GLOBAL
+    # Set when the layout the user chose cannot give every window its minimum size and another one is used instead
+    # (``spec`` is that other layout; what is stored for the chosen one is never touched): why, for the user.
+    fallback: str = ""
+
+    @property
+    def bsp_active(self) -> bool:
+        """The group is laid out by its own BSP tree (the one that is stored), not by a substitute layout."""
+        return not self.fallback and self.spec.kind_for(len(self.units)) == BSP
 
     @property
     def slots(self) -> list[tuple[str, TrackedWindow]]:
@@ -149,6 +159,9 @@ class DynamicTiler(QObject):
     # While the user drags a tiled window: where it will land if dropped now (visible frame, physical pixels), or
     # None (no valid target, or the drag is over). Computed with the same rules the drop itself uses.
     drop_preview = Signal(object)
+    # While the user resizes a tiled window: where the other tiles of its layout will be (list of rects) or None.
+    # ``drop_preview`` then carries the resized tile itself, so both together are the real layout after the release.
+    resize_preview = Signal(object)
 
     def __init__(self, wm: WorkspaceController, settings=None, debounce_ms: int = DEBOUNCE_MS,  # noqa: ANN001
                  display_debounce_ms: int = DISPLAY_DEBOUNCE_MS) -> None:
@@ -165,6 +178,7 @@ class DynamicTiler(QObject):
         self._raise: list[TrackedWindow] | bool = False
         self._focus_after: TrackedWindow | None = None  # give this window the focus after the next re-tile
         self._dragging: set[str] = set()  # keys of tiled windows the user is dragging / resizing
+        self._drag_start: dict[str, Rect] = {}  # window key -> its visible frame when the drag started
         self._denied: set[str] = set()  # windows Windows refuses to let CIRANA move: left out of the layout
         self._reported: set[tuple[str, str]] = set()  # (window key, status) already announced
         self._targets: dict[str, tuple[str, Rect]] = {}  # unit id -> (group id, rect of the last re-tile)
@@ -183,6 +197,7 @@ class DynamicTiler(QObject):
         self._history: deque[float] = deque()
         self._last_groups: list[Group] = []
         self._preview: Rect | None = None
+        self._neighbors: list[Rect] | None = None
         self._rules: list[WindowRule] = read_rules(settings.get("window_rules")) if settings is not None else []
         raw_adjust = settings.get("global_adjust") if settings is not None else None
         self._adjust: dict[str, dict] = dict(raw_adjust) if isinstance(raw_adjust, dict) else {}
@@ -229,11 +244,18 @@ class DynamicTiler(QObject):
 
     def set_global_layout(self, spec: LayoutSpec) -> None:
         if self.settings is not None:
+            old = self.global_layout()
             data = spec.to_dict()
             for key in ("free", "monitor", "bsp", "stacks"):
                 data.pop(key, None)  # every monitor has its own layout of the same kind (trees: runtime state)
+            if (spec.kind, spec.columns, spec.auto) != (old.kind, old.columns, old.auto):
+                self._set_adjust({})  # a new layout starts from its own proportions on every monitor
+                self._trees.clear()
+            elif spec.ratio != old.ratio:  # the main width was typed in: it replaces the dragged one
+                self._set_adjust({device: {k: v for k, v in kept.items() if k != "ratio"}
+                                  for device, kept in self._adjust.items()})
+            # (a different gap keeps the proportions the user dragged)
             self.settings.set("global_layout", data)
-            self._set_adjust({})  # a new layout starts from its own proportions on every monitor
             self.schedule(force=True)
 
     def _set_adjust(self, adjust: dict[str, dict]) -> None:
@@ -299,7 +321,7 @@ class DynamicTiler(QObject):
 
     def float_reason(self, window: TrackedWindow) -> str:
         """Why a window is not tiled by all-window tiling ("" when it is)."""
-        reason = self._excluded(window)
+        reason = self._excluded(window, programs=self.global_on)
         if reason:
             return reason
         return next((why for group in self._last_groups for unit, why in group.floating
@@ -315,9 +337,10 @@ class DynamicTiler(QObject):
             return "floating (you chose so for this window)"
         return ""
 
-    def _excluded(self, window: TrackedWindow) -> str:
-        """Why a window cannot take part in all-window tiling at all ("" when it can)."""
-        if window.exe_name.lower() in self.exclusions():
+    def _excluded(self, window: TrackedWindow, programs: bool = True) -> str:
+        """Why a window cannot take part in tiling at all ("" when it can). ``programs``: the programs chosen to float
+        count (all-window tiling only)."""
+        if programs and window.exe_name.lower() in self.exclusions():
             return "floating (you chose so for this program)"
         reason = self._rule_reason(window)
         if reason:
@@ -520,13 +543,24 @@ class DynamicTiler(QObject):
             area, gap = self._inner(spec, monitor)
             spec.bsp = bsp.to_dict(bsp.sync(tree, ids, area, self._focus_hint.get(group_id), gap))
         sizes = [self._unit_minimum(unit, monitor) for unit in units]
-        out = set(overflowing(spec, monitor.work, sizes, monitor.scale, ids)) if any(any(m) for m in sizes) else set()
+        out, fallback = set(), ""
+        if any(any(m) for m in sizes):
+            # The chosen layout is kept while every window fits. When it cannot give every window its minimum size,
+            # another layout is used (a pure function of the sizes, so it cannot flip back and forth) before any
+            # window is left floating.
+            fitted, floated = fit_layout(spec, monitor.work, sizes, monitor.scale, ids)
+            out = set(floated)
+            if fitted is not spec:
+                fallback = (f"{KIND_NAMES[spec.kind_for(len(units))]} → {KIND_NAMES[fitted.kind]}"
+                            f"{f' ({fitted.columns} column)' if fitted.kind == GRID and fitted.columns == 1 else ''}: "
+                            "the minimum sizes of the windows do not fit the chosen layout")
+                spec = fitted
         tiled = [unit for i, unit in enumerate(units) if i not in out]
         floating = [(unit, self._overflow_note(sizes[i], monitor)) for i, unit in enumerate(units) if i in out]
         minimums = {unit.id: sizes[i] for i, unit in enumerate(units) if i not in out and any(sizes[i])}
         monocle = self._monocle.get(group_id)
         shown = monocle[0] if monocle is not None and any(u.id == monocle[0] for u in tiled) else ""
-        return Group(group_id, spec, tiled, floating, minimums, shown, scope)
+        return Group(group_id, spec, tiled, floating, minimums, shown, scope, fallback)
 
     def _unit_minimum(self, unit: Unit, monitor: Monitor) -> Size:
         sizes = [self.minimum(window.key, monitor) for _s, window in unit.members]
@@ -539,7 +573,7 @@ class DynamicTiler(QObject):
         if size[0] > work_w or size[1] > work_h:
             return (f"floating: it needs at least {need}, more than this monitor's free area ({work_w} × {work_h}), "
                     "so it cannot be shown completely")
-        return f"floating: it needs at least {need} and does not fit beside the other tiled windows"
+        return f"floating: it needs at least {need} and does not fit beside the other tiled windows in any layout"
 
     @staticmethod
     def plan(group: Group, units: list[Unit], monitors: list[Monitor]) -> list[tuple[Unit, Rect]]:
@@ -583,6 +617,46 @@ class DynamicTiler(QObject):
             shown = "shown" if unit.window.key == window.key else "hidden"
             parts.append(f"stack {index + 1}/{len(unit.members)} ({shown})")
         return ", ".join(parts)
+
+    def status(self, window: TrackedWindow) -> tuple[str, str]:
+        """What dynamic tiling does with this window right now: (``tiled`` | ``stacked`` | ``floating`` |
+        ``ignored``, detail) - ("", "") when it is not in charge of the window (tiling is off, or the window is not
+        part of the scope that is managed)."""
+        if not self.in_charge():
+            return "", ""
+        rule = self.rule_for(window)
+        if rule is not None and rule.action == IGNORE:
+            return IGNORED, f"window rule “{rule.label}”"
+        found = self._unit_of(window.key)
+        if found is not None:
+            group, unit = found
+            parts = ["monocle"] if unit.id == group.monocle else []
+            if unit.stacked:
+                index = [s for s, _w in unit.members].index(next(s for s, w in unit.members if w.key == window.key))
+                parts.append(f"{index + 1}/{len(unit.members)}, {'shown' if unit.window.key == window.key else 'hidden'}")
+            if group.fallback:
+                parts.append(f"layout adjusted: {group.fallback}")
+            return (STACKED if unit.stacked else TILED), "; ".join(parts)
+        if not self._in_scope(window):
+            return "", ""
+        reason = self.float_reason(window)
+        if not reason:
+            return "", ""
+        for prefix in ("floating (", "floating: "):  # (the state itself is the first word)
+            if reason.startswith(prefix):
+                reason = reason[len(prefix):].removesuffix(")")
+        return FLOATING, reason
+
+    def _in_scope(self, window: TrackedWindow) -> bool:
+        """The window is one the managed scope is in charge of (all windows; or a bound / assigned workspace window)."""
+        if self.global_on:
+            return True
+        workspace_id = self._scope()
+        if not workspace_id:
+            return False
+        if any(s.window is not None and s.window.key == window.key for s in self.wm.statuses(workspace_id)):
+            return True
+        return any(w.key == window.key for w in self.rule_windows(workspace_id))
 
     def monocle_on(self) -> bool:
         return any(group.monocle for group in self._last_groups)
@@ -695,6 +769,7 @@ class DynamicTiler(QObject):
         if window.key in self._dragging:
             self._dragging.discard(window.key)
             self._set_preview(None)
+        self._drag_start.pop(window.key, None)
         self.schedule()
 
     def _on_changed(self, window: TrackedWindow) -> None:
@@ -761,6 +836,7 @@ class DynamicTiler(QObject):
         self._cancel()
         self._signature = None
         self._dragging.clear()
+        self._drag_start.clear()
         self._set_preview(None)
         self._targets.clear()
         self._last_groups = []
@@ -793,6 +869,13 @@ class DynamicTiler(QObject):
             return GLOBAL
         return self.wm.workspaces.active_id if self.manages(self.wm.workspaces.active_id) else ""
 
+    def _frame(self, window: TrackedWindow) -> Rect | None:
+        """The visible frame of a window as Windows has it now (the tracker's copy can lag behind a drag)."""
+        try:
+            return self.wm.tracker.backend.frame_rect(window.hwnd)
+        except Exception:  # noqa: BLE001 - the window closed meanwhile
+            return None
+
     def _on_move_size(self, window: TrackedWindow, started: bool) -> None:
         if not self.in_charge():
             return
@@ -802,6 +885,7 @@ class DynamicTiler(QObject):
             return
         if started:
             self._dragging.add(window.key)
+            self._drag_start[window.key] = self._frame(window) or window.rect
             self._cancel()  # never move a window while the user holds it (or one of its neighbours)
             group = tiled[window.key][0] if window.key in tiled else None
             if group is not None and group.monocle and self._monocle.pop(group.id, None) is not None:
@@ -810,24 +894,101 @@ class DynamicTiler(QObject):
             self._update_preview(window)
             return
         self._dragging.discard(window.key)
+        start = self._drag_start.pop(window.key, None)
         self._set_preview(None)
+        resized = False
         if window.key in tiled:
-            self._dropped(tiled[window.key][1].id, window)
+            group, unit = tiled[window.key]
+            resized = self._resized(group, unit, window, start)  # a resize is never a drop (no swap, no move)
+            if not resized:
+                self._dropped(unit.id, window)
         self.state_changed.emit(self._scope())
-        self.schedule(force=True)  # the drag is over: back into the layout
+        self.schedule(force=True, user=resized)  # the drag is over: back into the layout (the new one, if resized)
+
+    # -- resizing with the mouse ---------------------------------------------------------------------------------
+    def _resize_plan(self, group: Group, unit: Unit, frame: Rect, edges: dict[str, str]) -> Resize | str:
+        """The layout after the user dragged ``edges`` of ``unit``'s window to ``frame`` (the one function behind the
+        preview and the commit), or why it cannot be done."""
+        if group.fallback:
+            return (f"The layout is adjusted to the minimum sizes of the windows ({group.fallback}); "
+                    "it cannot be resized until they fit again.")
+        monitor = resolve(group.spec.monitor, self._monitors())
+        if monitor is None:
+            return "The monitor of this layout is not available."
+        ids = [u.id for u in group.units]
+        sizes = [group.minimums.get(u, (0, 0)) for u in ids]
+        return resize_tile(group.spec, monitor.work, len(ids), monitor.scale, sizes, ids, ids.index(unit.id), frame,
+                           edges)
+
+    def _resized(self, group: Group, unit: Unit, window: TrackedWindow, start: Rect | None) -> bool:
+        """The drag that just ended resized the window (one edge per axis moved, the opposite one stayed): the new
+        size becomes the layout's proportions and the neighbours follow. False when it was a move."""
+        frame = self._frame(window)
+        edges = moved_edges(start, frame) if start is not None and frame is not None else None
+        if edges is None:
+            return False
+        outcome = self._resize_plan(group, unit, frame, edges)
+        if isinstance(outcome, str):
+            self._say(outcome)  # the window goes back to its tile; the user is told why
+            return True
+        self._store_proportions(group, outcome.changes)
+        for note in outcome.notes:
+            self._say(note)
+        return True
+
+    def _store_proportions(self, group: Group, changes: dict) -> None:
+        """Keep the proportions of a resized layout where the keyboard commands keep theirs: the BSP tree through
+        ``_set_tree``; ratios and weights per monitor (all-window tiling) or in the workspace."""
+        if "bsp" in changes:
+            self._set_tree(group, bsp.from_dict(changes["bsp"]))
+        rest = {key: value for key, value in changes.items() if key != "bsp"}
+        if not rest:
+            return
+        if group.scope == GLOBAL:
+            adjust = dict(self._adjust)
+            adjust[group.id] = {**adjust.get(group.id, {}), **rest}
+            self._set_adjust(adjust)
+        else:
+            self.wm.workspaces.update_tiling(group.scope, **rest)
 
     # -- drop preview --------------------------------------------------------------------------------------------
     def _set_preview(self, rect: Rect | None) -> None:
         if rect != self._preview:
             self._preview = rect
             self.drop_preview.emit(rect)
+        if rect is None and self._neighbors is not None:
+            self._neighbors = None
+            self.resize_preview.emit(None)
+
+    def _set_neighbors(self, rects: list[Rect] | None) -> None:
+        if rects != self._neighbors:
+            self._neighbors = rects
+            self.resize_preview.emit(rects)
 
     def _update_preview(self, window: TrackedWindow) -> None:
         if not self.in_charge() or window.minimized or window.maximized:
             self._set_preview(None)
             return
         found = self._unit_of(window.key)
-        self._set_preview(self.predict_drop(found[1].id, window.rect) if found is not None else None)
+        if found is None:
+            self._set_preview(None)
+            return
+        group, unit = found
+        start, frame = self._drag_start.get(window.key), self._frame(window)
+        edges = moved_edges(start, frame) if start is not None and frame is not None else None
+        if edges is not None:  # being resized: the layout as it will be after the release
+            outcome = self._resize_plan(group, unit, frame, edges)
+            own = self._targets.get(unit.id)
+            if isinstance(outcome, str):
+                self._set_neighbors(None)
+                self._set_preview(own[1] if own is not None else None)
+            else:
+                index = [u.id for u in group.units].index(unit.id)
+                self._set_neighbors([rect for i, rect in enumerate(outcome.rects) if i != index])
+                self._set_preview(outcome.rects[index])
+            return
+        self._set_neighbors(None)
+        self._set_preview(self.predict_drop(unit.id, window.rect))
 
     def predict_drop(self, unit: str, frame: Rect) -> Rect | None:
         """Where the tile ``unit`` lands if its window is dropped with its visible frame at ``frame``: exactly what
@@ -897,7 +1058,7 @@ class DynamicTiler(QObject):
     def _swap(self, first: str, second: str) -> None:
         """Two units exchange places (the order, their monitors, and BSP trees)."""
         for group in self._last_groups:
-            if group.spec.kind_for(len(group.units)) == BSP:
+            if group.bsp_active:
                 tree = bsp.from_dict(group.spec.bsp)
                 swapped = self._swap_tree(tree, first, second)
                 if bsp.to_dict(swapped) != bsp.to_dict(tree):
@@ -1097,6 +1258,10 @@ class DynamicTiler(QObject):
         if count < 2:
             self._say(f"{window.display_title} is the only tile: there is nothing to resize against.")
             return False
+        if group.fallback:
+            self._say(f"The layout is adjusted to the minimum sizes of the windows ({group.fallback}); "
+                      "it cannot be resized until they fit again.")
+            return False
         if kind == BSP:
             tree = bsp.resize(bsp.from_dict(group.spec.bsp), unit.id, horizontal, delta)
             if tree is None:
@@ -1173,7 +1338,7 @@ class DynamicTiler(QObject):
         if not unit.stacked:
             tree = bsp.remove(tree, unit.id)
         self._save_stacks(scope, stacks)
-        if group.spec.kind_for(len(group.units)) == BSP:
+        if group.bsp_active:
             self._set_tree(group, tree)
         self._focus_after = window
         self._say(f"{window.display_title} is stacked with {target.display_title}.")
@@ -1216,14 +1381,14 @@ class DynamicTiler(QObject):
         group = group or next((g for g in self._last_groups if any(u.id == stack["id"] for u in g.units)), None)
         tree = bsp.from_dict(group.spec.bsp) if group is not None else None
         tree = self._dissolve(stacks, tree)
-        if beside and group is not None and group.spec.kind_for(len(group.units)) == BSP:
+        if beside and group is not None and group.bsp_active:
             monitor = resolve(group.spec.monitor, self._monitors())
             if monitor is not None:
                 area, gap = self._inner(group.spec, monitor)
                 near = stack["id"] if len(stack["members"]) >= 2 else stack["members"][0]
                 tree = bsp.insert(tree, slot, area, near, gap)
         self._save_stacks(scope, stacks)
-        if group is not None and group.spec.kind_for(len(group.units)) == BSP:
+        if group is not None and group.bsp_active:
             self._set_tree(group, tree)
         self.state_changed.emit(scope)
         self.schedule(force=True, user=True)
@@ -1363,7 +1528,7 @@ class DynamicTiler(QObject):
         raise_group, self._force, self._raise, self._user = self._raise, False, False, False
         focus_after, self._focus_after = self._focus_after, None
         for group in groups:  # BSP trees with the windows that came and went: kept for the next round
-            if group.spec.kind_for(len(group.units)) == BSP and group.spec.bsp != (
+            if group.bsp_active and group.spec.bsp != (
                     bsp.to_dict(self._trees.get(group.id)) if group.scope == GLOBAL
                     else self.wm.workspaces.get(group.scope).layout.bsp):
                 self._set_tree(group, bsp.from_dict(group.spec.bsp))

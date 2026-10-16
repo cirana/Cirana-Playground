@@ -100,7 +100,7 @@ class WindowManagerUiTests(unittest.TestCase):
         page.refresh()
         self.pump(timeout=0.05)
         self.assertIn("1 stack", page.tiling_state.text())
-        self.assertIn("stack 2/2 (shown)", self.texts(page.rows_host))
+        self.assertIn("stacked (2/2, shown)", self.texts(page.rows_host))
         built = []
 
         class Menu(QMenu):  # the row's tiling menu builds (and is not shown modally)

@@ -111,9 +111,10 @@ class EntryRow(QFrame):
             sub.setToolTip(detail)
             sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # a long title never widens it
             text.addWidget(sub)
-        tiling = ctx.tiler.describe(status.window) if status.window is not None else ""
-        if tiling:
-            text.addWidget(label(tiling[0].upper() + tiling[1:], "Muted"))
+        state, why = ctx.tiler.status(status.window) if status.window is not None else ("", "")
+        if state:
+            shown = state + (f" ({why})" if why else "")
+            text.addWidget(label(shown[0].upper() + shown[1:], "Muted"))
         if status.message:
             note = label(status.message, "RowWarning", wrap=True)
             text.addWidget(note)

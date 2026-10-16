@@ -169,9 +169,15 @@ it ends up under its neighbour or off the screen and its content looks cut off o
 asks another application for its minimum (no message is sent to it); it learns it from what the controller reads back
 (`Status.CONSTRAINED`: same position, larger frame), remembers it per window and DPI, and lays the monitor out again
 with every tile at least that large (`wm/layout.py`: `tile(..., minimums)`, the others share the rest by weight).
-When the minimums cannot fit beside each other, the newest window with a minimum *floats*: it is moved (never
-shrunk) so that it is completely on the screen, or with its top-left corner on the screen when it is larger than the
-monitor, and the reason is shown on its row and reported once. The drop preview uses the same planning. What an
+When the minimums cannot fit in the layout you chose, **another layout is tried before any window floats**
+(`layout.fit_layout`: main + side panel, a grid, side by side, a single column or row stack, a fresh BSP tree; the
+one that floats the fewest windows wins, the first on a tie, so it depends on the sizes only and never flips back
+and forth). The chosen layout is never changed or overwritten (not its kind, not its stored BSP tree); the
+substitute is shown on the Windows page ("layout adjusted to minimum sizes", and on every row) and is dropped as soon
+as the windows fit the chosen layout again. Only when no layout can hold a window, the newest window with a minimum
+*floats*: it is moved (never shrunk) so that it is completely on the screen, or with its top-left corner on the screen
+when it is larger than the monitor, and the reason ("does not fit beside the other tiled windows in any layout")
+is shown on its row and reported once. The drop preview uses the same planning. What an
 application draws inside a window of the size it accepted is up to the application.
 
 **One workspace.** A per-workspace switch (*Dynamic tiling* in the layout panel, stored with the layout as `"dynamic"`; records written
@@ -183,7 +189,8 @@ side, main + side panel, grids) follows its windows by itself:
 | A window of the workspace opens (launched, recognised by its rule, chosen by you, or re-created by its app) | It gets a tile; the others make room. |
 | One closes | The others fill the gap. |
 | One is minimized or maximized | It leaves the layout until it is restored; CIRANA never changes its state. |
-| You drag or resize a tiled window | Nothing is re-tiled until you let go (a running re-tile is cancelled). Dropped onto another tile: the two swap places (the order is saved). Otherwise it goes back to its tile. |
+| You drag a tiled window | Nothing is re-tiled until you let go (a running re-tile is cancelled). Dropped onto another tile: the two swap places (the order is saved). Otherwise it goes back to its tile. |
+| You resize a tiled window with the mouse | Told from a move by its edges: a resize keeps the opposite edge, a move shifts both. The new size becomes the layout's proportions (see *Resize with the mouse*) and the neighbours follow. |
 | Layout settings, entry order or monitors change | Re-tiled once. |
 | Another workspace becomes active | Only the active one is managed; the others' windows are left where they are. |
 
@@ -235,8 +242,23 @@ The focused window is read back from Windows (`GetForegroundWindow`), falling ba
   injection, no attached input queues). Focus changes never start a re-tile.
 * **Resize.** BSP: the split nearest to the tile in that direction moves by 5 % (10–90 %). Side by side: column
   weights. Main + side panel: the main width (from any tile) and the side windows' heights. Grid tiles cannot be
-  resized alone (the message says so). Workspace layouts store the result with the workspace; all-window tiling per
+  resized alone with the keyboard (the message says so; the mouse can). Workspace layouts store the result with the workspace; all-window tiling per
   monitor (`global_adjust`). Keyboard commands are re-tiled at once and are not rate limited.
+* **Resize with the mouse.** At `EVENT_SYSTEM_MOVESIZESTART` the window's frame is read, at `END` again; one edge
+  per axis moved and the opposite one stayed = a resize (a window whose size did not change was moved; one whose both
+  edges shifted was snapped: both are drops). The edge is mapped to the divider it belongs to by the pure
+  `layout.resize_tile` (the same function draws the preview and commits the result): BSP: the nearest split on that side
+  (`bsp.resize_edge`, ratio 10-90 %); side by side: the weights of the two neighbouring columns; main + side: the
+  `ratio` (from either side of the divider) and the side windows' `heights`; grid: dedicated `grid_cols` / `grid_rows`
+  (full rows only; the stretched last row has no vertical divider of its own, and the message says so). Only the two
+  tiles at the divider change, nobody overlaps or leaves the work area, known minimum sizes and a small share of the
+  area are kept, an edge on the border of the screen has no divider (the window goes back and the reason is shown). While the
+  button is held the grey preview shows the resized tile and the other tiles at their real target sizes
+  (`resize_preview` for the neighbours, `drop_preview` for the tile); borders follow. The result is stored like the
+  keyboard's: in the workspace, or per monitor in `global_adjust` (BSP trees: runtime state), and survives
+  workspace switches, monitors being unplugged and a change of the gap (a different layout kind or main width
+  replaces it). New windows get an average share of stored weights. A layout substituted for minimum sizes cannot be
+  resized.
 * **Monocle** shows the focused tile over the whole work area (minus the gap) and raises it; the others keep their
   tiles behind it. Nothing in the layout changes, so switching it off puts every window back exactly where it was.
   It ends when its window closes, minimizes or maximizes, when it is dragged, and when a new window joins the layout.
@@ -350,11 +372,13 @@ and nothing to recover after a crash.
 * Windows on other virtual desktops are cloaked and therefore not listed.
 * Dynamic tiling reacts to the mouse move loop only: a window moved with the keyboard (Win+Arrow snapping) or by the
   application itself stays where it went until the next change of the workspace's windows re-tiles it. Dragging
-  onto another tile swaps the two; resizing does not change the layout's proportions (the window snaps back).
+  onto another tile swaps the two; resizing an edge changes the layout's proportions (see *Resize with the mouse*).
 * Real mouse drags of tiled windows were tested with simulated move-loop events, not with a physical drag. The
   global shortcuts were tested by registering them on the real system (taken / released, error 1409) and by
   delivering the hotkey message; pressing them physically was not automated (synthetic input is refused).
-* Grid tiles cannot be resized one by one (BSP can); resizing with the mouse still snaps back to the layout.
+* In a grid the mouse moves whole columns and rows; the tiles of a stretched last row have no vertical divider, so
+  they can only change their height. Side by side has no heights to change and main + side no widths for the side
+  windows alone: such a resize goes back to the layout and says why. Keyboard resize of a grid is not available.
 * A workspace's layout fills one monitor: moving one of its windows to another monitor makes it float there.
   Swapping with a window a rule assigns to a workspace exchanges BSP tiles, but that order is not stored (such
   windows have no entry).

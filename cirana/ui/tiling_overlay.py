@@ -166,6 +166,7 @@ class TilingOverlays(QObject):
         self.settings = settings
         self.borders: dict[str, BorderOverlay] = {}
         self.preview = PreviewOverlay()
+        self.neighbors: list[PreviewOverlay] = []  # the other tiles of the layout while a tile is being resized
         self._stopped = False
         self._sync_timer = QTimer(self, singleShot=True, interval=30)  # coalesces bursts of changes
         self._sync_timer.timeout.connect(self.sync)
@@ -177,6 +178,7 @@ class TilingOverlays(QObject):
         tiler.reflowed.connect(lambda _s: self.schedule())
         tiler.state_changed.connect(lambda _s: self.schedule())
         tiler.drop_preview.connect(self._on_preview)
+        tiler.resize_preview.connect(self._on_neighbors)
         tiler.wm.workspaces.active_changed.connect(lambda _w: self.schedule())
         tiler.wm.workspaces.changed.connect(self.schedule)
 
@@ -285,12 +287,28 @@ class TilingOverlays(QObject):
         monitor = monitor_for_rect(rect, self._monitors())
         self.preview.place(rect, monitor.scale if monitor is not None else 1.0)  # stays on top by itself
 
+    def _on_neighbors(self, rects: list[Rect] | None) -> None:
+        """While a tile is resized: the grey boxes of the other tiles, where they will be after the release."""
+        rects = [] if rects is None or self._stopped else list(rects)
+        monitors = self._monitors() if rects else []
+        while len(self.neighbors) < len(rects):
+            self.neighbors.append(PreviewOverlay())
+        for overlay, rect in zip(self.neighbors, rects):
+            monitor = monitor_for_rect(rect, monitors)
+            overlay.place(rect, monitor.scale if monitor is not None else 1.0)
+        for overlay in self.neighbors[len(rects):]:
+            overlay.hide()
+            overlay.rect_px = None
+
     # -- shutdown -----------------------------------------------------------------------------------------------
     def clear(self) -> None:
         for key in list(self.borders):
             self._drop(key)
         self.preview.hide()
         self.preview.rect_px = None
+        for overlay in self.neighbors:
+            overlay.hide()
+            overlay.rect_px = None
 
     def stop(self) -> None:
         self._stopped = True

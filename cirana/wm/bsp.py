@@ -17,6 +17,7 @@ from typing import Any, Union
 from cirana.wm.identity import Rect
 
 MIN_RATIO, MAX_RATIO = 0.1, 0.9
+FLOOR = 0.05  # a resized tile leaves each window at least this share of the area (when it has no minimum)
 MAX_DEPTH = 32  # a damaged file can never make the recursion run away
 
 
@@ -195,6 +196,78 @@ def resize(node: Node | None, leaf_id: str, vertical: bool, delta: float) -> Nod
             split.ratio = ratio
             return result
     return None
+
+
+def resize_edge(node: Node | None, leaf_id: str, edge: str, position: int, area: Rect, gap: int = 0,
+                minimums: dict[str, Size] | None = None) -> Node | None:
+    """The tree after the ``edge`` ("left" / "right" / "top" / "bottom") of tile ``leaf_id`` was dragged to
+    ``position`` (physical pixels): the nearest split that edge belongs to moves its divider there, kept inside
+    the ratio bounds and, when the space allows it, so every window keeps its minimum. None when that edge lies on
+    the border of the area (no divider) or the divider cannot move (any further)."""
+    if node is None or leaf_id not in leaves(node):
+        return None
+    vertical = edge in ("left", "right")
+    in_a = edge in ("right", "bottom")  # the tile must be on the ``a`` side of the split its edge touches
+    result = copy(node)
+    path: list[tuple[Split, bool]] = []
+
+    def find(item: Node) -> bool:
+        if isinstance(item, Leaf):
+            return item.id == leaf_id
+        for side, child in ((True, item.a), (False, item.b)):
+            path.append((item, side))
+            if find(child):
+                return True
+            path.pop()
+        return False
+
+    find(result)
+    target = next((split for split, side in reversed(path) if split.vertical == vertical and side == in_a), None)
+    if target is None:
+        return None
+    minimums = minimums or {}
+    box_of: dict[int, Rect] = {}
+
+    def walk(item: Node, box: Rect) -> None:  # the boxes exactly as rects() lays them out
+        if isinstance(item, Leaf):
+            return
+        box_of[id(item)] = box
+        left, top, right, bottom = box
+        need_a, need_b = _minimum(item.a, minimums, gap), _minimum(item.b, minimums, gap)
+        if item.vertical:
+            cut = _cut(left, right, item.ratio, gap, need_a[0], need_b[0])
+            walk(item.a, (left, top, cut, bottom))
+            walk(item.b, (min(right, cut + gap), top, right, bottom))
+        else:
+            cut = _cut(top, bottom, item.ratio, gap, need_a[1], need_b[1])
+            walk(item.a, (left, top, right, cut))
+            walk(item.b, (left, min(bottom, cut + gap), right, bottom))
+
+    walk(result, area)
+    left, top, right, bottom = box_of[id(target)]
+    start, end = (left, right) if vertical else (top, bottom)
+    usable = end - start - gap
+    if usable <= 0:
+        return None
+    # a window without a known minimum still keeps a sliver of its own: FLOOR of the area
+    floor = (round((area[2] - area[0]) * FLOOR), round((area[3] - area[1]) * FLOOR))
+    floored = {leaf: (max(minimums.get(leaf, (0, 0))[0], floor[0]), max(minimums.get(leaf, (0, 0))[1], floor[1]))
+               for leaf in leaves(result)}
+    need_a, need_b = _minimum(target.a, floored, gap), _minimum(target.b, floored, gap)
+    axis = 0 if vertical else 1
+    cut = position if in_a else position - gap  # where ``a`` ends
+    size = cut - start
+    low, high = round(usable * MIN_RATIO), round(usable * MAX_RATIO)
+    if need_a[axis] + need_b[axis] <= usable:
+        low, high = max(low, need_a[axis]), min(high, usable - need_b[axis])
+    if low > high:
+        return None
+    ratio = min(high, max(low, size)) / usable
+    ratio = min(MAX_RATIO, max(MIN_RATIO, ratio))
+    if abs(ratio - target.ratio) < 1e-3:
+        return None
+    target.ratio = round(ratio, 4)
+    return result
 
 
 # -- storage ------------------------------------------------------------------------------------------------------

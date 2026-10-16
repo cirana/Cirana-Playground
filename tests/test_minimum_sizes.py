@@ -111,13 +111,13 @@ class TilerMinimumTests(OverlayEnv):
 
     def test_a_window_that_does_not_fit_floats_completely_visible(self):
         self.global_on()
-        first, second = self.open("First", min_size=(1200, 0)), self.open("Second", min_size=(1200, 0))
+        first, second = self.open("First", min_size=(1200, 600)), self.open("Second", min_size=(1200, 600))
         self.flush()
         self.assertEqual(first.rect, LEFT.work)  # tiled alone
         self.assertTrue(inside(second.rect, LEFT.work), second.rect)  # floating, moved (not shrunk) on the screen
-        self.assertEqual(second.rect[2] - second.rect[0], 1200)
+        self.assertGreaterEqual(second.rect[2] - second.rect[0], 1200)  # never shrunk below its minimum
         reason = self.tiler.float_reason(self.desktop.tracked(second.hwnd))
-        self.assertIn("needs at least 1200 px wide", reason)
+        self.assertIn("needs at least 1200 px wide × 600 px high", reason)
         self.assertEqual(len(self.messages), 1)
         self.assertIn("Second", self.messages[0])
         self.assertIsNone(self.border(second))  # not tiled: no tile border
@@ -147,7 +147,7 @@ class TilerMinimumTests(OverlayEnv):
 
     def test_workspace_window_that_does_not_fit_shows_why(self):
         self.tiled_workspace("Code", "Notes")
-        code, notes = self.open("Code", min_size=(1500, 0)), self.open("Notes", min_size=(1000, 0))
+        code, notes = self.open("Code", min_size=(1500, 600)), self.open("Notes", min_size=(1000, 600))
         self.flush()
         self.assertEqual(code.rect, LEFT.work)
         self.assertTrue(inside(notes.rect, LEFT.work))

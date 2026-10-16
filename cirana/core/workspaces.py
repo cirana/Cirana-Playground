@@ -416,10 +416,11 @@ class WorkspaceManager(QObject):
 
     def update_tiling(self, workspace_id: str, **fields: Any) -> None:
         """Store what dynamic tiling keeps for the workspace: its BSP tree, stacks and the proportions changed with
-        the keyboard (``bsp``, ``stacks``, ``weights``, ``ratio``, ``heights``). Not a user edit (``updated`` is
+        the keyboard or the mouse (``bsp``, ``stacks``, ``weights``, ``ratio``, ``heights``, ``grid_cols``,
+        ``grid_rows``). Not a user edit (``updated`` is
         kept)."""
         workspace = self._require(workspace_id)
-        allowed = {"bsp", "stacks", "weights", "ratio", "heights"}
+        allowed = {"bsp", "stacks", "weights", "ratio", "heights", "grid_cols", "grid_rows"}
         changed = False
         for key, value in fields.items():
             if key in allowed and getattr(workspace.layout, key) != value:

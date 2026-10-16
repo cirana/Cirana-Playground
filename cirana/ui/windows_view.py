@@ -63,13 +63,10 @@ class WindowRow(QFrame):
         meta = window_subtitle(window) + (f" · {where}" if where else "")
         if groups:
             meta += " · in " + ", ".join(groups)
-        tiler = ctx.tiler
-        if tiler.global_on:
-            reason = tiler.float_reason(window)
-            meta += f" · {reason}" if reason else f" · {tiler.describe(window) or 'tiled'}"
-        elif tiler.describe(window):
-            meta += f" · {tiler.describe(window)}"
-        elif tiler.ignores(window):
+        state, detail = ctx.tiler.status(window)  # tiled / stacked / floating / ignored, and why
+        if state:
+            meta += f" · {state}" + (f" ({detail})" if detail else "")
+        elif ctx.tiler.ignores(window):
             meta += " · ignored (window rule)"
         sub = label(meta, "AppCategory")
         sub.setToolTip(window.app_exe)
@@ -221,7 +218,9 @@ class WindowsView(QWidget):
             state = (f"On: {len(tiled)} window{'s' if len(tiled) != 1 else ''} tiled"
                      + (f" on {monitors} monitors" if monitors > 1 else "")
                      + (f" · {stacks} stack{'s' if stacks != 1 else ''}" if stacks else "")
-                     + (" · monocle" if tiler.monocle_on() else ""))
+                     + (" · monocle" if tiler.monocle_on() else "")
+                     + (" · layout adjusted to minimum sizes" if any(g.fallback for g in tiler.shown_groups())
+                        else ""))
             kind = "good"
         self.tiling_state.setText(state)
         self.tiling_state.setProperty("kind", kind)
