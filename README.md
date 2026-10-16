@@ -1,134 +1,137 @@
 <div align="center">
 
-<img src="docs/assets/logo.png" width="112" alt="CIRANA logo">
+<img src="docs/assets/logo.png" width="112" alt="CIRANA logosu">
 
 # CIRANA
 
-### Every window, in its place.
+### Her pencere, yerinde.
 
-CIRANA launches your applications and arranges their real windows into workspaces and tiled layouts on Windows.<br>
-Open something and it takes its place. No embedding, no restyling, nothing leaves your computer.
+CIRANA, uygulamalarınızı başlatır ve gerçek pencerelerini Windows'ta çalışma alanlarına ve döşemeli (tiled) düzenlere yerleştirir.<br>
+Bir şey açın, yerine otomatik oturur. Gömme yok, görünüm değişikliği yok, hiçbir veri bilgisayarınızdan çıkmaz.
 
-[Get started](#getting-started) · [See it in action](#see-it-in-action) · [Shortcuts](docs/shortcuts.md) · [Architecture](docs/architecture.md)
+[Başlarken](#başlarken) · [Çalışırken görün](#çalışırken-görün) · [Kısayollar](docs/shortcuts.md) · [Mimari](docs/architecture.md)
 
-**English** · [Türkçe](README.tr.md)
+[English](README.en.md) · **Türkçe**
 
 </div>
 
 <!--
-  SLOT hero  ->  docs/assets/hero.png  (1600 px wide; see docs/assets/README.md)
-  Delete the comment markers to show it:
+  SLOT hero  ->  docs/assets/hero.png  (1600 px genişlik; bkz. docs/assets/README.md)
+  Göstermek için yorum işaretlerini silin:
 
-  <p align="center"><img src="docs/assets/hero.png" alt="CIRANA's Home page beside tiled application windows" width="960"></p>
+  <p align="center"><img src="docs/assets/hero.png" alt="CIRANA ana ekranı ve döşenmiş uygulama pencereleri" width="960"></p>
 -->
 
 <br>
 
-## Why CIRANA?
+## Neden CIRANA?
 
-**One click to a working setup.** Save a group of applications as a workspace, for example *Development* with an editor, a
-browser and a terminal. Activating it reuses the windows that are open, starts the ones that are missing, places
-them side by side or in a grid, and brings them to the front.
+**Tek tıkla çalışır bir düzen.** Bir uygulama grubunu çalışma alanı olarak kaydedin; örneğin bir editör, bir tarayıcı ve
+bir terminalden oluşan *Development*. Çalışma alanını etkinleştirince açık pencereler yeniden kullanılır, eksik olanlar
+başlatılır, hepsi yan yana ya da ızgara düzeninde yerleşir ve öne getirilir.
 
-**Windows arrange themselves.** With dynamic tiling, a new window gets a tile and the others make room. A closed window
-gives its space back. A layout engine picks the arrangement that suits the number of windows, the shape of the
-monitor and the minimum sizes the applications insist on.
+**Pencereler kendini düzenler.** Dinamik döşemede yeni pencere kendi karesini alır, diğerleri ona yer açar. Kapanan pencere
+alanını geri verir. Düzen motoru, pencere sayısına, monitörün şekline ve uygulamaların ısrar ettiği en küçük boyutlara
+uyan yerleşimi seçer.
 
-**Your applications stay yours.** CIRANA never embeds, re-parents or restyles another window. Every application keeps
-its own title bar, taskbar button and Alt+Tab entry, and keeps running if CIRANA closes. It is fully offline, with
-no account, server or telemetry. Data lives in `%LOCALAPPDATA%\CIRANA\`.
+**Uygulamalarınız size ait kalır.** CIRANA başka bir uygulamanın penceresini asla gömmez, başka bir pencereye bağlamaz,
+görünümünü değiştirmez. Her uygulama kendi başlık çubuğunu, görev çubuğu düğmesini ve Alt+Tab girişini korur; CIRANA
+kapansa bile çalışmaya devam eder. Tamamen çevrimdışıdır: hesap, sunucu ya da telemetri yoktur. Veriler
+`%LOCALAPPDATA%\CIRANA\` altında durur.
 
 <br>
 
-## Features
+## Özellikler
 
-### Find and launch anything
+### Her şeyi bulun ve başlatın
 
-Home, Applications and Favorites show everything CIRANA found in the Start Menu, packaged apps and App Paths
-registrations, sorted into categories you can rename. Press `Ctrl+K` to search applications, categories and workspaces from anywhere in the window.
+Ana sayfa, Uygulamalar ve Favoriler; Başlat menüsünde, paketlenmiş uygulamalarda ve App Paths kayıtlarında bulunan her şeyi,
+yeniden adlandırabileceğiniz kategorilere ayrılmış olarak gösterir. Pencerenin içinde her yerden `Ctrl+K` ile uygulama,
+kategori ve çalışma alanı arayabilirsiniz.
 
 <!--
   SLOT dashboard  ->  docs/assets/dashboard.png
-  <p align="center"><img src="docs/assets/dashboard.png" alt="CIRANA Home with workspace cards and application categories" width="900"></p>
+  <p align="center"><img src="docs/assets/dashboard.png" alt="Çalışma alanı kartları ve uygulama kategorileriyle CIRANA ana sayfası" width="900"></p>
 -->
 
-### Workspaces
+### Çalışma alanları
 
-A workspace is a named group of applications or open windows with its own layout, monitor, gap and main-panel width.
-Reorder entries by drag and drop, choose between several windows of one program, and see a live preview of the
-layout before you apply it. Closing a workspace only stops managing its windows; every application keeps running.
+Çalışma alanı; kendi düzeni, monitörü, boşluğu ve ana panel genişliği olan, adlandırılmış bir uygulama veya açık pencere
+grubudur. Girdileri sürükleyip bırakarak sıralayın, aynı programın birden çok penceresi arasından seçim yapın, uygulamadan
+önce düzenin canlı önizlemesini görün. Çalışma alanını kapatmak yalnızca pencerelerini yönetmeyi bırakır; uygulamalar
+çalışmaya devam eder.
 
 <!--
   SLOT workspaces  ->  docs/assets/workspaces.png
-  <p align="center"><img src="docs/assets/workspaces.png" alt="The Workspaces page with a layout preview" width="900"></p>
+  <p align="center"><img src="docs/assets/workspaces.png" alt="Düzen önizlemesiyle Çalışma alanları sayfası" width="900"></p>
 -->
 
-### Adaptive tiling
+### Uyarlanabilir döşeme
 
-*Automatic (adaptive)* tries BSP, main + side panel, grid, a single column and side by side, scores each one, and keeps
-the best. It takes the monitor's shape into account (three windows go side by side on an ultrawide and into a column on a
-portrait monitor), avoids slivers and tiny tiles, and keeps your layout steady instead of flipping between
-arrangements. Applications that refuse to shrink below a minimum size are given room or float instead of being
-cut off.
+*Automatic (adaptive)*; BSP, ana + yan panel, ızgara, tek sütun ve yan yana düzenlerini dener, her birini puanlar ve en
+iyisini tutar. Monitörün şeklini hesaba katar (üç pencere ultrawide'da yan yana, dikey monitörde tek sütun olur), ince
+şeritlerden ve minik karelerden kaçınır, düzeninizi bir yerleşimden diğerine sıçratmadan sabit tutar. En küçük boyuttan
+daha fazla küçülmeyi reddeden uygulamalara yer açılır ya da kesilmek yerine yüzer hale getirilir.
 
 <!--
   SLOT adaptive-layout  ->  docs/assets/adaptive-layout.png
-  <p align="center"><img src="docs/assets/adaptive-layout.png" alt="Adaptive layout with several tiled windows" width="900"></p>
+  <p align="center"><img src="docs/assets/adaptive-layout.png" alt="Birden çok döşenmiş pencereyle uyarlanabilir düzen" width="900"></p>
 -->
 
-### Applications side by side
+### Uygulamalar yan yana
 
-Every managed window gets a thin border: green for the focused one, grey for the others. Drag a window onto another to
-swap them, and a translucent preview shows where it will land. Drag an edge to resize, and the neighbours follow.
+Yönetilen her pencere ince bir kenarlık alır: odaktaki yeşil, diğerleri gri. Bir pencereyi başka birinin üstüne sürükleyip
+yer değiştirin; yarı saydam önizleme nereye oturacağını gösterir. Bir kenarı sürükleyerek yeniden boyutlandırın, komşular
+uyum sağlar.
 
 <!--
   SLOT side-by-side  ->  docs/assets/side-by-side.png
-  <p align="center"><img src="docs/assets/side-by-side.png" alt="Several applications tiled side by side with a focus border" width="900"></p>
+  <p align="center"><img src="docs/assets/side-by-side.png" alt="Odak kenarlığıyla yan yana döşenmiş birkaç uygulama" width="900"></p>
 -->
 
-### BSP, stacks and monocle
+### BSP, yığınlar ve monocle
 
-In a BSP layout a new window splits the tile that has focus. Stack several windows into one tile and flip through
-them, or use **monocle** to give the focused window the whole screen and put everything back exactly as it was.
+BSP düzeninde yeni pencere, odaktaki kareyi böler. Birkaç pencereyi tek bir kareye yığıp aralarında gezinebilir ya da
+**monocle** ile odaktaki pencereye tüm ekranı verip kapattığınızda her şeyi tam eski yerine koyabilirsiniz.
 
 <!--
   SLOT monocle  ->  docs/assets/monocle.png
-  <p align="center"><img src="docs/assets/monocle.png" alt="A window in monocle mode filling the work area" width="900"></p>
+  <p align="center"><img src="docs/assets/monocle.png" alt="Çalışma alanını dolduran monocle modunda bir pencere" width="900"></p>
 -->
 
-### Keyboard control
+### Klavye kontrolü
 
-Move focus, swap tiles, resize, float, stack and send windows to another workspace with global shortcuts that
-need no mouse and work in every application. See [Keyboard shortcuts](#keyboard-shortcuts).
+Odağı taşıyın, kareleri değiştirin, boyutlandırın, yüzdürün, yığın yapın ve pencereleri başka bir çalışma alanına gönderin.
+Küresel kısayollar fare gerektirmez ve her uygulamada çalışır. Bkz. [Klavye kısayolları](#klavye-kısayolları).
 
-### Smooth motion
+### Akıcı hareket
 
-Windows glide to their new places, focus borders fade and the drop preview moves between targets. It is purely
-visual: the final positions are exactly the same with or without animation, and you can turn it off.
+Pencereler yeni yerlerine süzülür, odak kenarlıkları solar, bırakma önizlemesi hedefler arasında kayar. Bu tamamen
+görseldir: son konumlar animasyon olsa da olmasa da birebir aynıdır ve isterseniz kapatabilirsiniz.
 
 <br>
 
-## See it in action
+## Çalışırken görün
 
-A short demo is planned. It will show:
+Kısa bir demo planlanıyor. Şunları gösterecek:
 
-- a window opening and settling into the layout
-- two windows swapping places
-- an animated re-tile when a window closes
-- switching a window to monocle and back
+- bir pencerenin açılıp düzene oturması
+- iki pencerenin yer değiştirmesi
+- bir pencere kapanınca animasyonlu yeniden döşeme
+- bir pencereyi monocle'a alıp geri döndürme
 
 <!--
-  SLOT demo  ->  docs/assets/demo.gif  (1280 px wide, under 5 MB)
-  <p align="center"><img src="docs/assets/demo.gif" alt="CIRANA tiling, swapping and monocle in action" width="900"></p>
+  SLOT demo  ->  docs/assets/demo.gif  (1280 px genişlik, 5 MB altı)
+  <p align="center"><img src="docs/assets/demo.gif" alt="CIRANA'nın döşeme, yer değiştirme ve monocle işlemleri" width="900"></p>
 -->
 
 <br>
 
-## Getting started
+## Başlarken
 
-CIRANA is run from source for now. No installer or release is published yet.
+CIRANA şimdilik kaynak koddan çalıştırılır. Henüz yayınlanmış bir yükleyici veya sürüm yoktur.
 
-**Prerequisites:** Windows 11 and Python 3.11 or newer (`py -0p` lists the versions you have).
+**Ön koşullar:** Windows 11 ve Python 3.11 veya üzeri (`py -0p` kurulu sürümleri listeler).
 
 ```powershell
 git clone https://github.com/cirana/Cirana-Playground.git
@@ -138,91 +141,95 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m cirana
 ```
 
-**First run**
+**İlk çalıştırma**
 
-1. CIRANA scans for your applications once and caches the list. Use *Scan now* in Settings to refresh it.
-2. On a **new installation, all-window tiling is on** and the layout is *Automatic (adaptive)*. Your open
-   application windows are arranged straight away. To turn it off, clear *Tile all windows* on the Windows page.
-3. Open **Workspaces**, create one, add applications (*Add applications…*) or windows that are already open
-   (*Add open windows…*), choose a layout and press *Activate*.
-4. Press `Ctrl+K` to search and launch, and use the shortcuts below to move things around.
+1. CIRANA uygulamalarınızı bir kez tarar ve listeyi önbelleğe alır. Yenilemek için Ayarlar'daki *Scan now* düğmesini kullanın.
+2. **Yeni bir kurulumda tüm pencerelerin döşenmesi açıktır** ve düzen *Automatic (adaptive)*'dir. Açık uygulama
+   pencereleriniz hemen düzenlenir. Kapatmak için Windows sayfasında *Tile all windows* işaretini kaldırın.
+3. **Workspaces** sayfasını açın, bir çalışma alanı oluşturun, uygulama ekleyin (*Add applications…*) veya zaten açık
+   pencereleri ekleyin (*Add open windows…*), bir düzen seçin ve *Activate*'e basın.
+4. Aramak ve başlatmak için `Ctrl+K`'ye basın, işleri taşımak için aşağıdaki kısayolları kullanın.
 
-If you used an earlier version, your settings are left exactly as they are. Layouts you chose stay chosen, and *Automatic
-(adaptive)* is one more entry in the layout list.
+Önceki bir sürümü kullandıysanız ayarlarınıza dokunulmaz. Seçtiğiniz düzenler seçili kalır; *Automatic (adaptive)*
+düzen listesine eklenen bir seçenektir.
 
-**Build an executable.** `pip install pyinstaller` and `pyinstaller cirana.spec --noconfirm` produce a one-folder build
-in `dist\CIRANA\`.
+**Çalıştırılabilir dosya oluşturma.** `pip install pyinstaller` ve `pyinstaller cirana.spec --noconfirm`,
+`dist\CIRANA\` altında tek klasörlü bir derleme üretir.
 
 <br>
 
-## Keyboard shortcuts
+## Klavye kısayolları
 
-The defaults act on the window that has the focus.
+Varsayılanlar odaktaki pencere üzerinde çalışır.
 
-| Shortcut | Action |
+| Kısayol | İşlem |
 |---|---|
-| `Ctrl+Alt+` arrows | Focus the neighbouring window |
-| `Ctrl+Alt+Shift+` arrows | Swap with the neighbouring tile, or move to the next monitor at the edge |
-| `Ctrl+Alt+Win+` arrows | Make the tile wider, narrower, taller or lower |
-| `Ctrl+Alt+Enter` | Monocle on / off |
-| `Ctrl+Alt+Space` | Float the window / tile it again |
-| `Ctrl+Alt+PageDown` / `PageUp` | Next / previous window of the stack |
-| `Ctrl+Alt+Backspace` | Take the window out of its stack |
-| `Ctrl+Alt+Shift+PageDown` / `PageUp` | Move the window to the next / previous workspace |
-| `Ctrl+K` | Search and launch (inside CIRANA) |
+| `Ctrl+Alt+` ok tuşları | Komşu pencereye odaklan |
+| `Ctrl+Alt+Shift+` ok tuşları | Komşu kareyle yer değiştir; kenarda sonraki monitöre taşı |
+| `Ctrl+Alt+Win+` ok tuşları | Kareyi genişlet, daralt, uzat veya kısalt |
+| `Ctrl+Alt+Enter` | Monocle aç / kapat |
+| `Ctrl+Alt+Space` | Pencereyi yüzdür / yeniden döşe |
+| `Ctrl+Alt+PageDown` / `PageUp` | Yığındaki sonraki / önceki pencere |
+| `Ctrl+Alt+Backspace` | Pencereyi yığından çıkar |
+| `Ctrl+Alt+Shift+PageDown` / `PageUp` | Pencereyi sonraki / önceki çalışma alanına taşı |
+| `Ctrl+K` | Ara ve başlat (CIRANA içinde) |
 
-Every shortcut can be changed in **Settings → Keyboard and focus → Edit shortcuts…**. The full list, including actions
-with no default shortcut, is in [docs/shortcuts.md](docs/shortcuts.md).
-
-<br>
-
-## Customization
-
-**Layout.** On the Windows page, choose the layout for all-window tiling: *Automatic (adaptive)* (the default for new
-installations), *By window count*, *Side by side*, *Main + side panel*, *Grid 2×2*, *Dynamic grid* or *BSP*, plus gap and
-main-panel width. Picking a layout by hand switches the adaptive engine off for that scope. Choosing *Automatic
-(adaptive)* again turns it back on.
-
-**Floating windows.** Press `Ctrl+Alt+Space` to float the focused window, or use the ☰ menu on its row in the Windows page. Under
-*Settings → Window rules* you can make a program always float, always be ignored, or belong to a workspace.
-Windows without a sizing border, such as fixed dialogs and full-screen games, are never tiled.
-
-**Workspaces.** Each workspace has its own layout, monitor, gap and main-panel width, and a *Dynamic tiling* switch that
-makes its windows follow the layout as they open and close.
-
-**Animation.** *Settings → Animations* controls window movement (on by default, 180 ms, up to 350 ms, or 0 for none),
-the focus-border fade and the drop-preview glide. The *Borders* switch on the Windows page hides the focus borders.
-
-**Focus follows the mouse.** Off by default. While on, it uses Windows' own setting for all windows, and your own value comes
-back when CIRANA closes.
+Her kısayol **Settings → Keyboard and focus → Edit shortcuts…** bölümünden değiştirilebilir. Varsayılan kısayolu olmayan
+işlemlerle birlikte tam liste [docs/shortcuts.md](docs/shortcuts.md) dosyasındadır (İngilizce).
 
 <br>
 
-## Requirements
+## Özelleştirme
 
-- **Windows 11.** CIRANA is developed and tested on Windows 11. The code has no version check, but Windows 10 has not
-  been verified.
-- **Python 3.11+** with PySide6 6.6+, pywin32 and psutil (all in `requirements.txt`) to run from source.
-- Multiple monitors and per-monitor DPI are supported.
-- Windows does not let a normal program move an elevated application's window. CIRANA reports it and leaves that window
-  alone. Windows on other virtual desktops are not managed. More in [docs/limitations.md](docs/limitations.md).
+**Düzen.** Windows sayfasında tüm pencereleri döşeme düzenini seçin: *Automatic (adaptive)* (yeni kurulumlarda
+varsayılan), *By window count*, *Side by side*, *Main + side panel*, *Grid 2×2*, *Dynamic grid* veya *BSP*; ayrıca boşluk ve
+ana panel genişliği. Düzeni elle seçmek, uyarlanabilir motoru o kapsam için kapatır. *Automatic (adaptive)*'i yeniden
+seçmek açar.
+
+**Yüzen pencereler.** Odaktaki pencereyi yüzdürmek için `Ctrl+Alt+Space`'e basın ya da Windows sayfasında satırındaki ☰
+menüsünü kullanın. *Settings → Window rules* altında bir programı her zaman yüzen, her zaman yok sayılan ya da bir
+çalışma alanına ait yapabilirsiniz. Boyutlandırma kenarlığı olmayan pencereler (sabit diyaloglar, tam ekran oyunlar) hiç
+döşenmez.
+
+**Çalışma alanları.** Her çalışma alanının kendi düzeni, monitörü, boşluğu ve ana panel genişliği vardır; ayrıca
+pencereleri açılıp kapandıkça düzeni takip ettiren bir *Dynamic tiling* anahtarı bulunur.
+
+**Animasyon.** *Settings → Animations* pencere hareketini (varsayılan olarak açık, 180 ms, en çok 350 ms; 0 animasyonsuz),
+odak kenarlığının solmasını ve bırakma önizlemesinin kaymasını denetler. Windows sayfasındaki *Borders* anahtarı odak
+kenarlıklarını gizler.
+
+**Fareyi izleyen odak.** Varsayılan olarak kapalıdır. Açıkken Windows'un kendi ayarını tüm pencereler için kullanır;
+CIRANA kapanınca sizin değeriniz geri gelir.
 
 <br>
 
-## Development
+## Gereksinimler
+
+- **Windows 11.** CIRANA Windows 11'de geliştirildi ve test edildi. Kodda sürüm denetimi yok, ancak Windows 10
+  doğrulanmadı.
+- Kaynaktan çalıştırmak için **Python 3.11+**; PySide6 6.6+, pywin32 ve psutil (hepsi `requirements.txt` içinde).
+- Birden çok monitör ve monitör başına DPI desteklenir.
+- Windows, normal yetkili bir programın yükseltilmiş (yönetici) uygulamanın penceresini taşımasına izin vermez. CIRANA
+  bunu bildirir ve o pencereye dokunmaz. Diğer sanal masaüstlerindeki pencereler yönetilmez. Ayrıntılar
+  [docs/limitations.md](docs/limitations.md) dosyasında (İngilizce).
+
+<br>
+
+## Geliştirme
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests -t .
 ```
 
-The regular suite runs the window manager against a simulated desktop and never touches a real window. Opt-in live
-tests (`CIRANA_LIVE=1`) exercise real Win32 windows. Set `CIRANA_HOME` to use a separate data folder.
+Normal test paketi pencere yöneticisini simüle edilmiş bir masaüstüne karşı çalıştırır ve gerçek bir pencereye asla
+dokunmaz. İsteğe bağlı canlı testler (`CIRANA_LIVE=1`) gerçek Win32 pencerelerini dener. Ayrı bir veri klasörü için
+`CIRANA_HOME` ayarlayın.
 
-| Document | Contents |
+| Doküman (İngilizce) | İçerik |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Modules, window tracking, layouts, tiling, shortcuts, data |
-| [docs/testing.md](docs/testing.md) | Test strategy, live tests, what is not covered |
-| [docs/limitations.md](docs/limitations.md) | Known limitations |
-| [docs/shortcuts.md](docs/shortcuts.md) | Every keyboard shortcut |
-| [docs/assets/README.md](docs/assets/README.md) | How the screenshots and demo are captured |
+| [docs/architecture.md](docs/architecture.md) | Modüller, pencere izleme, düzenler, döşeme, kısayollar, veri |
+| [docs/testing.md](docs/testing.md) | Test stratejisi, canlı testler, kapsam dışı olanlar |
+| [docs/limitations.md](docs/limitations.md) | Bilinen sınırlamalar |
+| [docs/shortcuts.md](docs/shortcuts.md) | Tüm klavye kısayolları |
+| [docs/assets/README.md](docs/assets/README.md) | Ekran görüntüleri ve demo nasıl çekilir |

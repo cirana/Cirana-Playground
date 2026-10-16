@@ -1,11 +1,11 @@
 # Screenshots and demo media
 
 This folder holds the images used by the [README](../../README.md). `logo.png` is the only file here at the moment.
-The screenshots and the demo GIF still have to be captured from the real application. The README already contains a
+The screenshots and the demo GIF still have to be captured from the real application. Each README already contains a
 commented-out `<img>` block for each one (search for `SLOT`), so adding a file is two steps:
 
 1. Save the capture here under the exact name in the table below.
-2. In both `README.md` and `README.tr.md`, delete the `<!--` and `-->` lines around that slot's `<img>`.
+2. In both `README.md` (Turkish, the one GitHub shows) and `README.en.md` (English), delete the `<!--` and `-->` lines around that slot's `<img>`.
 
 Neither README points at a file that does not exist yet.
 
